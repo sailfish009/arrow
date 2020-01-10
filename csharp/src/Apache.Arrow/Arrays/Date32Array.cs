@@ -18,8 +18,28 @@ using System;
 
 namespace Apache.Arrow
 {
-    public class Date32Array: PrimitiveArray<int>
+    public class Date32Array : PrimitiveArray<int>
     {
+        private const int MillisecondsPerDay = 86400000;
+
+        public class Builder : PrimitiveArrayBuilder<DateTimeOffset, int, Date32Array, Builder>
+        {
+            internal class DateBuilder : PrimitiveArrayBuilder<int, Date32Array, DateBuilder>
+            {
+                protected override Date32Array Build(
+                    ArrowBuffer valueBuffer, ArrowBuffer nullBitmapBuffer,
+                    int length, int nullCount, int offset) =>
+                    new Date32Array(valueBuffer, nullBitmapBuffer, length, nullCount, offset);
+            }
+
+            public Builder() : base(new DateBuilder()) { }
+
+            protected override int ConvertTo(DateTimeOffset value)
+            {
+                return (int)(value.ToUnixTimeMilliseconds() / MillisecondsPerDay);
+            }
+        }
+
         public Date32Array(
             ArrowBuffer valueBuffer, ArrowBuffer nullBitmapBuffer,
             int length, int nullCount, int offset)
@@ -27,7 +47,7 @@ namespace Apache.Arrow
                 new[] { nullBitmapBuffer, valueBuffer }))
         { }
 
-        public Date32Array(ArrayData data) 
+        public Date32Array(ArrayData data)
             : base(data)
         {
             data.EnsureDataType(ArrowTypeId.Date32);
@@ -39,11 +59,12 @@ namespace Apache.Arrow
         {
             var value = GetValue(index);
 
-            const long millisecondsPerDay = 86_400_000;
+            if (!value.HasValue)
+            {
+                return default;
+            }
 
-            return value.HasValue
-                ? DateTimeOffset.FromUnixTimeMilliseconds(value.Value * millisecondsPerDay)
-                : default;
+            return DateTimeOffset.FromUnixTimeMilliseconds(value.Value * MillisecondsPerDay);
         }
     }
 }

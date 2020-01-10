@@ -24,7 +24,7 @@ use crate::util::bit_util;
 
 use std::ops::{BitAnd, BitOr};
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct Bitmap {
     pub(crate) bits: Buffer,
 }
@@ -54,6 +54,14 @@ impl Bitmap {
     pub fn is_set(&self, i: usize) -> bool {
         assert!(i < (self.bits.len() << 3));
         unsafe { bit_util::get_bit_raw(self.bits.raw_data(), i) }
+    }
+
+    pub fn buffer_ref(&self) -> &Buffer {
+        &self.bits
+    }
+
+    pub fn to_buffer(self) -> Buffer {
+        self.bits
     }
 }
 
@@ -122,5 +130,4 @@ mod tests {
         assert_eq!(true, bitmap.is_set(6));
         assert_eq!(false, bitmap.is_set(7));
     }
-
 }

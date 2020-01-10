@@ -20,7 +20,6 @@ import pickle
 import pytest
 import random
 import unittest
-import pandas.util.testing as pdt
 
 from io import BytesIO
 from os.path import join as pjoin
@@ -30,6 +29,7 @@ import pyarrow as pa
 import pyarrow.tests.test_parquet as test_parquet
 
 from pyarrow.compat import guid
+from pyarrow.pandas_compat import _pandas_api
 
 
 # ----------------------------------------------------------------------
@@ -297,6 +297,7 @@ class HdfsTestCases(object):
         expected = pa.concat_tables(test_data)
         return expected
 
+    @pytest.mark.pandas
     @pytest.mark.parquet
     def test_read_multiple_parquet_files(self):
 
@@ -307,10 +308,12 @@ class HdfsTestCases(object):
         expected = self._write_multiple_hdfs_pq_files(tmpdir)
         result = self.hdfs.read_parquet(tmpdir)
 
-        pdt.assert_frame_equal(result.to_pandas()
-                               .sort_values(by='index').reset_index(drop=True),
-                               expected.to_pandas())
+        _pandas_api.assert_frame_equal(result.to_pandas()
+                                       .sort_values(by='index')
+                                       .reset_index(drop=True),
+                                       expected.to_pandas())
 
+    @pytest.mark.pandas
     @pytest.mark.parquet
     def test_read_multiple_parquet_files_with_uri(self):
         import pyarrow.parquet as pq
@@ -323,10 +326,12 @@ class HdfsTestCases(object):
         path = _get_hdfs_uri(tmpdir)
         result = pq.read_table(path)
 
-        pdt.assert_frame_equal(result.to_pandas()
-                               .sort_values(by='index').reset_index(drop=True),
-                               expected.to_pandas())
+        _pandas_api.assert_frame_equal(result.to_pandas()
+                                       .sort_values(by='index')
+                                       .reset_index(drop=True),
+                                       expected.to_pandas())
 
+    @pytest.mark.pandas
     @pytest.mark.parquet
     def test_read_write_parquet_files_with_uri(self):
         import pyarrow.parquet as pq
@@ -345,15 +350,17 @@ class HdfsTestCases(object):
 
         result = pq.read_table(path, filesystem=self.hdfs).to_pandas()
 
-        pdt.assert_frame_equal(result, df)
+        _pandas_api.assert_frame_equal(result, df)
 
     @pytest.mark.parquet
+    @pytest.mark.pandas
     def test_read_common_metadata_files(self):
         tmpdir = pjoin(self.tmp_path, 'common-metadata-' + guid())
         self.hdfs.mkdir(tmpdir)
         test_parquet._test_read_common_metadata_files(self.hdfs, tmpdir)
 
     @pytest.mark.parquet
+    @pytest.mark.pandas
     def test_write_to_dataset_with_partitions(self):
         tmpdir = pjoin(self.tmp_path, 'write-partitions-' + guid())
         self.hdfs.mkdir(tmpdir)
@@ -361,6 +368,7 @@ class HdfsTestCases(object):
             tmpdir, filesystem=self.hdfs)
 
     @pytest.mark.parquet
+    @pytest.mark.pandas
     def test_write_to_dataset_no_partitions(self):
         tmpdir = pjoin(self.tmp_path, 'write-no_partitions-' + guid())
         self.hdfs.mkdir(tmpdir)
@@ -409,10 +417,14 @@ def _get_hdfs_uri(path):
     return uri
 
 
+@pytest.mark.hdfs
+@pytest.mark.pandas
 @pytest.mark.parquet
 @pytest.mark.fastparquet
 @pytest.mark.parametrize('client', ['libhdfs', 'libhdfs3'])
 def test_fastparquet_read_with_hdfs(client):
+    from pandas.util.testing import assert_frame_equal, makeDataFrame
+
     try:
         import snappy  # noqa
     except ImportError:
@@ -423,7 +435,7 @@ def test_fastparquet_read_with_hdfs(client):
 
     fs = hdfs_test_client(client)
 
-    df = pdt.makeDataFrame()
+    df = makeDataFrame()
     table = pa.Table.from_pandas(df)
 
     path = '/tmp/testing.parquet'
@@ -433,4 +445,4 @@ def test_fastparquet_read_with_hdfs(client):
     parquet_file = fastparquet.ParquetFile(path, open_with=fs.open)
 
     result = parquet_file.to_pandas()
-    pdt.assert_frame_equal(result, df)
+    assert_frame_equal(result, df)

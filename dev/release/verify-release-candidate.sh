@@ -23,18 +23,20 @@
 # - Maven >= 3.3.9
 # - JDK >=7
 # - gcc >= 4.8
-# - nodejs >= 6.0.0 (best way is to use nvm)
+# - Node.js >= 11.12 (best way is to use nvm)
+# - Go >= 1.11
 #
 # If using a non-system Boost, set BOOST_ROOT and add Boost libraries to
-# LD_LIBRARY_PATH
+# LD_LIBRARY_PATH.
 
 case $# in
   3) ARTIFACT="$1"
      VERSION="$2"
      RC_NUMBER="$3"
      case $ARTIFACT in
-       source|binaries) ;;
-       *) echo "Invalid argument: '${ARTIFACT}', valid options are 'source' or 'binaries'"
+       source|binaries|wheels) ;;
+       *) echo "Invalid argument: '${ARTIFACT}', valid options are \
+'source', 'binaries', or 'wheels'"
           exit 1
           ;;
      esac
@@ -44,12 +46,11 @@ case $# in
      ;;
 esac
 
-set -ex
+set -e
+set -x
 set -o pipefail
 
-HERE=$(cd `dirname "${BASH_SOURCE[0]:-$0}"` && pwd)
-
-ARROW_DIST_URL='https://dist.apache.org/repos/dist/dev/arrow'
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 detect_cuda() {
   if ! (which nvcc && which nvidia-smi) > /dev/null; then
@@ -60,10 +61,15 @@ detect_cuda() {
   return $((${n_gpus} < 1))
 }
 
+# Build options for the C++ library
+
 if [ -z "${ARROW_CUDA:-}" ] && detect_cuda; then
   ARROW_CUDA=ON
 fi
 : ${ARROW_CUDA:=OFF}
+: ${ARROW_FLIGHT:=ON}
+
+ARROW_DIST_URL='https://dist.apache.org/repos/dist/dev/arrow'
 
 download_dist_file() {
   curl \
@@ -94,51 +100,9 @@ fetch_archive() {
   shasum -a 512 -c ${dist_name}.tar.gz.sha512
 }
 
-bintray() {
-  local command=$1
-  shift
-  local path=$1
-  shift
-  local url=https://bintray.com/api/v1${path}
-  echo "${command} ${url}" 1>&2
-  curl \
-    --fail \
-    --request ${command} \
-    ${url} \
-    "$@" | \
-      jq .
-}
-
-download_bintray_files() {
-  local target=$1
-
-  local version_name=${VERSION}-rc${RC_NUMBER}
-
-  bintray \
-    GET /packages/${BINTRAY_REPOSITORY}/${target}-rc/versions/${version_name}/files | \
-      jq -r ".[].path" | \
-      while read file; do
-    mkdir -p "$(dirname ${file})"
-    curl \
-      --fail \
-      --location \
-      --output ${file} \
-      https://dl.bintray.com/${BINTRAY_REPOSITORY}/${file}
-  done
-}
-
-verify_binary_artifacts() {
-  local download_dir=binaries
-  mkdir -p ${download_dir}
-  pushd ${download_dir}
-
-  # takes longer on slow network
-  for target in centos debian python ubuntu; do
-    download_bintray_files ${target}
-  done
-
+verify_dir_artifact_signatures() {
   # verify the signature and the checksums of each artifact
-  find . -name '*.asc' | while read sigfile; do
+  find $1 -name '*.asc' | while read sigfile; do
     artifact=${sigfile/.asc/}
     gpg --verify $sigfile $artifact || exit 1
 
@@ -152,13 +116,57 @@ verify_binary_artifacts() {
     shasum -a 512 -c $base_artifact.sha512 || exit 1
     popd
   done
-
-  popd
 }
+
+test_binary() {
+  local download_dir=binaries
+  mkdir -p ${download_dir}
+
+  python3 $SOURCE_DIR/download_rc_binaries.py $VERSION $RC_NUMBER --dest=${download_dir}
+  verify_dir_artifact_signatures ${download_dir}
+}
+
+test_apt() {
+  for target in "debian:stretch" \
+                "debian:buster" \
+                "ubuntu:xenial" \
+                "ubuntu:bionic" \
+                "ubuntu:disco"; do
+    if ! docker run -v "${SOURCE_DIR}"/../..:/arrow:delegated \
+           "${target}" \
+           /arrow/dev/release/verify-apt.sh \
+           "${VERSION}" \
+           "yes" \
+           "${BINTRAY_REPOSITORY}"; then
+      echo "Failed to verify the APT repository for ${target}"
+      exit 1
+    fi
+  done
+}
+
+test_yum() {
+  for target in "centos:6" \
+                "centos:7"; do
+    if ! docker run -v "${SOURCE_DIR}"/../..:/arrow:delegated \
+           "${target}" \
+           /arrow/dev/release/verify-yum.sh \
+           "${VERSION}" \
+           "yes" \
+           "${BINTRAY_REPOSITORY}"; then
+      echo "Failed to verify the Yum repository for ${target}"
+      exit 1
+    fi
+  done
+}
+
 
 setup_tempdir() {
   cleanup() {
-    rm -fr "$TMPDIR"
+    if [ "${TEST_SUCCESS}" = "yes" ]; then
+      rm -fr "${TMPDIR}"
+    else
+      echo "Failed to verify release candidate. See ${TMPDIR} for details."
+    fi
   }
   trap cleanup EXIT
   TMPDIR=$(mktemp -d -t "$1.XXXXX")
@@ -173,14 +181,29 @@ setup_miniconda() {
     MINICONDA_URL=https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh
   fi
 
-  MINICONDA=`pwd`/test-miniconda
+  MINICONDA=$PWD/test-miniconda
 
   wget -O miniconda.sh $MINICONDA_URL
   bash miniconda.sh -b -p $MINICONDA
   rm -f miniconda.sh
 
   . $MINICONDA/etc/profile.d/conda.sh
+}
 
+# Build and test Java (Requires newer Maven -- I used 3.3.9)
+
+test_package_java() {
+  pushd java
+
+  mvn test
+  mvn package
+
+  popd
+}
+
+# Build and test C++
+
+test_and_install_cpp() {
   conda create -n arrow-test -y -q -c conda-forge \
         python=3.6 \
         nomkl \
@@ -189,37 +212,99 @@ setup_miniconda() {
         six \
         cython
   conda activate arrow-test
-}
 
-# Build and test C++
-
-test_and_install_cpp() {
   mkdir cpp/build
   pushd cpp/build
 
   ARROW_CMAKE_OPTIONS="
-${ARROW_CMAKE_OPTIONS}
+${ARROW_CMAKE_OPTIONS:-}
 -DCMAKE_INSTALL_PREFIX=$ARROW_HOME
 -DCMAKE_INSTALL_LIBDIR=lib
+-DARROW_FLIGHT=${ARROW_FLIGHT}
 -DARROW_PLASMA=ON
 -DARROW_ORC=ON
 -DARROW_PYTHON=ON
 -DARROW_GANDIVA=ON
 -DARROW_PARQUET=ON
+-DPARQUET_REQUIRE_ENCRYPTION=ON
+-DARROW_WITH_BZ2=ON
+-DARROW_WITH_ZLIB=ON
+-DARROW_WITH_ZSTD=ON
+-DARROW_WITH_LZ4=ON
+-DARROW_WITH_SNAPPY=ON
+-DARROW_WITH_BROTLI=ON
 -DARROW_BOOST_USE_SHARED=ON
 -DCMAKE_BUILD_TYPE=release
 -DARROW_BUILD_TESTS=ON
+-DARROW_BUILD_INTEGRATION=ON
 -DARROW_CUDA=${ARROW_CUDA}
+-DARROW_DEPENDENCY_SOURCE=AUTO
 "
   cmake $ARROW_CMAKE_OPTIONS ..
 
-  make -j$NPROC
-  make install
+  make -j$NPROC install
 
-  git clone https://github.com/apache/parquet-testing.git
-  export PARQUET_TEST_DATA=$PWD/parquet-testing/data
+  # TODO: ARROW-5036: plasma-serialization_tests broken
+  # TODO: ARROW-5054: libgtest.so link failure in flight-server-test
+  LD_LIBRARY_PATH=$PWD/release:$LD_LIBRARY_PATH ctest \
+    --exclude-regex "plasma-serialization_tests" \
+    -j$NPROC \
+    --output-on-failure \
+    -L unittest
+  popd
+}
 
-  ctest -VV -L unittest
+test_csharp() {
+  pushd csharp
+
+  local csharp_bin=${PWD}/bin
+  mkdir -p ${csharp_bin}
+
+  if which dotnet > /dev/null 2>&1; then
+    if ! which sourcelink > /dev/null 2>&1; then
+      local dotnet_tools_dir=$HOME/.dotnet/tools
+      if [ -d "${dotnet_tools_dir}" ]; then
+        PATH="${dotnet_tools_dir}:$PATH"
+      fi
+    fi
+  else
+    local dotnet_version=2.2.300
+    local dotnet_platform=
+    case "$(uname)" in
+      Linux)
+        dotnet_platform=linux
+        ;;
+      Darwin)
+        dotnet_platform=macos
+        ;;
+    esac
+    local dotnet_download_thank_you_url=https://dotnet.microsoft.com/download/thank-you/dotnet-sdk-${dotnet_version}-${dotnet_platform}-x64-binaries
+    local dotnet_download_url=$( \
+      curl ${dotnet_download_thank_you_url} | \
+        grep 'window\.open' | \
+        grep -E -o '[^"]+' | \
+        sed -n 2p)
+    curl ${dotnet_download_url} | \
+      tar xzf - -C ${csharp_bin}
+    PATH=${csharp_bin}:${PATH}
+  fi
+
+  dotnet test
+  mv dummy.git ../.git
+  dotnet pack -c Release
+  mv ../.git dummy.git
+
+  if ! which sourcelink > /dev/null 2>&1; then
+    dotnet tool install --tool-path ${csharp_bin} sourcelink
+    PATH=${csharp_bin}:${PATH}
+    if ! sourcelink --help > /dev/null 2>&1; then
+      export DOTNET_ROOT=${csharp_bin}
+    fi
+  fi
+
+  sourcelink test artifacts/Apache.Arrow/Release/netstandard1.3/Apache.Arrow.pdb
+  sourcelink test artifacts/Apache.Arrow/Release/netcoreapp2.1/Apache.Arrow.pdb
+
   popd
 }
 
@@ -230,19 +315,38 @@ test_python() {
 
   pip install -r requirements.txt -r requirements-test.txt
 
-  python setup.py build_ext --inplace --with-parquet --with-plasma
+  export PYARROW_WITH_GANDIVA=1
+  export PYARROW_WITH_PARQUET=1
+  export PYARROW_WITH_PLASMA=1
+  if [ "${ARROW_CUDA}" = "ON" ]; then
+    export PYARROW_WITH_CUDA=1
+  fi
+  if [ "${ARROW_FLIGHT}" = "ON" ]; then
+    export PYARROW_WITH_FLIGHT=1
+  fi
+
+  python setup.py build_ext --inplace
   py.test pyarrow -v --pdb
 
   popd
 }
 
-
 test_glib() {
   pushd c_glib
 
-  ./configure --prefix=$ARROW_HOME
-  make -j$NPROC
-  make install
+  if brew --prefix libffi > /dev/null 2>&1; then
+    PKG_CONFIG_PATH=$(brew --prefix libffi)/lib/pkgconfig:$PKG_CONFIG_PATH
+  fi
+
+  if [ -f configure ]; then
+    ./configure --prefix=$ARROW_HOME
+    make -j$NPROC
+    make install
+  else
+    meson build --prefix=$ARROW_HOME --libdir=lib
+    ninja -C build
+    ninja -C build install
+  fi
 
   export GI_TYPELIB_PATH=$ARROW_HOME/lib/girepository-1.0:$GI_TYPELIB_PATH
 
@@ -258,6 +362,14 @@ test_glib() {
 
 test_js() {
   pushd js
+
+  export NVM_DIR="`pwd`/.nvm"
+  mkdir -p $NVM_DIR
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.34.0/install.sh | bash
+  [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+  nvm install node
+
   npm install
   # clean, lint, and build JS source
   npx run-s clean:all lint build
@@ -292,10 +404,19 @@ test_ruby() {
   popd
 }
 
+test_go() {
+  pushd go/arrow
+
+  go get -v ./...
+  go test ./...
+
+  popd
+}
+
 test_rust() {
   # install rust toolchain in a similar fashion like test-miniconda
-  export RUSTUP_HOME=`pwd`/test-rustup
-  export CARGO_HOME=`pwd`/test-rustup
+  export RUSTUP_HOME=$PWD/test-rustup
+  export CARGO_HOME=$PWD/test-rustup
 
   curl https://sh.rustup.rs -sSf | sh -s -- -y --no-modify-path
 
@@ -305,90 +426,72 @@ test_rust() {
   # build and test rust
   pushd rust
 
+  # raises on any formatting errors
+  rustup component add rustfmt --toolchain stable
+  cargo +stable fmt --all -- --check
+
   # we are targeting Rust nightly for releases
   rustup default nightly
 
-  # raises on any formatting errors
-  rustup component add rustfmt-preview
-  cargo fmt --all -- --check
-  # raises on any warnings
+  # use local modules because we don't publish modules to crates.io yet
+  sed \
+    -i.bak \
+    -E \
+    -e 's/^arrow = "([^"]*)"/arrow = { version = "\1", path = "..\/arrow" }/g' \
+    -e 's/^parquet = "([^"]*)"/parquet = { version = "\1", path = "..\/parquet" }/g' \
+    */Cargo.toml
 
+  # raises on any warnings
   RUSTFLAGS="-D warnings" cargo build
   cargo test
 
   popd
 }
 
-# Build and test Java (Requires newer Maven -- I used 3.3.9)
-
-test_package_java() {
-  pushd java
-
-  mvn test
-  mvn package
-
-  popd
-}
-
 # Run integration tests
 test_integration() {
-  JAVA_DIR=`pwd`/java
-  CPP_BUILD_DIR=`pwd`/cpp/build
+  JAVA_DIR=$PWD/java
+  CPP_BUILD_DIR=$PWD/cpp/build
 
   export ARROW_JAVA_INTEGRATION_JAR=$JAVA_DIR/tools/target/arrow-tools-$VERSION-jar-with-dependencies.jar
   export ARROW_CPP_EXE_PATH=$CPP_BUILD_DIR/release
 
-  pushd integration
+  pip3 install -e dev/archery
 
-  python integration_test.py
+  INTEGRATION_TEST_ARGS=""
 
-  popd
+  if [ "${ARROW_FLIGHT}" = "ON" ]; then
+    INTEGRATION_TEST_ARGS="${INTEGRATION_TEST_ARGS} --run-flight"
+  fi
+
+  # Flight integration test executable have runtime dependency on
+  # release/libgtest.so
+  LD_LIBRARY_PATH=$ARROW_CPP_EXE_PATH:$LD_LIBRARY_PATH \
+      archery integration \
+              --with-cpp=${TEST_INTEGRATION_CPP} \
+              --with-java=${TEST_INTEGRATION_JAVA} \
+              --with-js=${TEST_INTEGRATION_JS} \
+              --with-go=${TEST_INTEGRATION_GO} \
+              $INTEGRATION_TEST_ARGS
 }
 
-setup_tempdir "arrow-$VERSION"
-echo "Working in sandbox $TMPDIR"
-cd $TMPDIR
+test_source_distribution() {
+  export ARROW_HOME=$TMPDIR/install
+  export PARQUET_HOME=$TMPDIR/install
+  export LD_LIBRARY_PATH=$ARROW_HOME/lib:${LD_LIBRARY_PATH:-}
+  export PKG_CONFIG_PATH=$ARROW_HOME/lib/pkgconfig:${PKG_CONFIG_PATH:-}
 
-export ARROW_HOME=$TMPDIR/install
-export PARQUET_HOME=$TMPDIR/install
-export LD_LIBRARY_PATH=$ARROW_HOME/lib:$LD_LIBRARY_PATH
-export PKG_CONFIG_PATH=$ARROW_HOME/lib/pkgconfig:$PKG_CONFIG_PATH
+  if [ "$(uname)" == "Darwin" ]; then
+    NPROC=$(sysctl -n hw.ncpu)
+  else
+    NPROC=$(nproc)
+  fi
 
-if [ "$(uname)" == "Darwin" ]; then
-  NPROC=$(sysctl -n hw.ncpu)
-else
-  NPROC=$(nproc)
-fi
+  git clone https://github.com/apache/arrow-testing.git
+  export ARROW_TEST_DATA=$PWD/arrow-testing/data
 
-import_gpg_keys
-
-if [ "$ARTIFACT" == "source" ]; then
-  TARBALL=apache-arrow-$1.tar.gz
-  DIST_NAME="apache-arrow-${VERSION}"
-
-  # By default test all functionalities.
-  # To deactivate one test, deactivate the test and all of its dependents
-  # To explicitly select one test, set TEST_DEFAULT=0 TEST_X=1
-  : ${TEST_DEFAULT:=1}
-  : ${TEST_JAVA:=${TEST_DEFAULT}}
-  : ${TEST_CPP:=${TEST_DEFAULT}}
-  : ${TEST_GLIB:=${TEST_DEFAULT}}
-  : ${TEST_RUBY:=${TEST_DEFAULT}}
-  : ${TEST_PYTHON:=${TEST_DEFAULT}}
-  : ${TEST_JS:=${TEST_DEFAULT}}
-  : ${TEST_INTEGRATION:=${TEST_DEFAULT}}
-  : ${TEST_RUST:=${TEST_DEFAULT}}
-
-  # Automatically test if its activated by a dependent
-  TEST_GLIB=$((${TEST_GLIB} + ${TEST_RUBY}))
-  TEST_PYTHON=$((${TEST_PYTHON} + ${TEST_INTEGRATION}))
-  TEST_CPP=$((${TEST_CPP} + ${TEST_GLIB} + ${TEST_PYTHON}))
-  TEST_JAVA=$((${TEST_JAVA} + ${TEST_INTEGRATION}))
-  TEST_JS=$((${TEST_JS} + ${TEST_INTEGRATION}))
-
-  fetch_archive $DIST_NAME
-  tar xvzf ${DIST_NAME}.tar.gz
-  cd ${DIST_NAME}
+  git clone https://github.com/apache/parquet-testing.git
+  export PARQUET_TEST_DATA=$PWD/parquet-testing/data
 
   if [ ${TEST_JAVA} -gt 0 ]; then
     test_package_java
@@ -396,6 +499,9 @@ if [ "$ARTIFACT" == "source" ]; then
   if [ ${TEST_CPP} -gt 0 ]; then
     setup_miniconda
     test_and_install_cpp
+  fi
+  if [ ${TEST_CSHARP} -gt 0 ]; then
+    test_csharp
   fi
   if [ ${TEST_PYTHON} -gt 0 ]; then
     test_python
@@ -409,17 +515,194 @@ if [ "$ARTIFACT" == "source" ]; then
   if [ ${TEST_JS} -gt 0 ]; then
     test_js
   fi
-  if [ ${TEST_INTEGRATION} -gt 0 ]; then
-    test_integration
+  if [ ${TEST_GO} -gt 0 ]; then
+    test_go
   fi
   if [ ${TEST_RUST} -gt 0 ]; then
     test_rust
   fi
-else
+  if [ ${TEST_INTEGRATION} -gt 0 ]; then
+    test_integration
+  fi
+}
+
+test_binary_distribution() {
   : ${BINTRAY_REPOSITORY:=apache/arrow}
 
-  verify_binary_artifacts
+  if [ ${TEST_BINARY} -gt 0 ]; then
+    test_binary
+  fi
+  if [ ${TEST_APT} -gt 0 ]; then
+    test_apt
+  fi
+  if [ ${TEST_YUM} -gt 0 ]; then
+    test_yum
+  fi
+}
+
+check_python_imports() {
+  local py_arch=$1
+
+  python -c "import pyarrow.parquet"
+  python -c "import pyarrow.plasma"
+  python -c "import pyarrow.fs"
+
+  if [[ "$py_arch" =~ ^3 ]]; then
+    # Flight and Gandiva are only available for py3
+    python -c "import pyarrow.flight"
+    python -c "import pyarrow.gandiva"
+  fi
+}
+
+test_linux_wheels() {
+  local py_arches="2.7mu 3.5m 3.6m 3.7m 3.8"
+  local manylinuxes="1 2010 2014"
+
+  for py_arch in ${py_arches}; do
+    local env=_verify_wheel-${py_arch}
+    conda create -yq -n ${env} python=${py_arch//[mu]/}
+    conda activate ${env}
+
+    for ml_spec in manylinuxes; do
+      if [[ "$py_arch" = "2.7mu" && "$ml_spec" = "2014" ]]; then
+        # manylinux2014 does not support py2.7, so skip that one
+        continue
+      fi
+
+      pip install python-rc/${VERSION}-rc${RC_NUMBER}/pyarrow-${VERSION}-cp${py_arch//[mu.]/}-cp${py_arch//./}-manylinux${ml_spec}_x86_64.whl
+
+      check_python_imports py_arch
+    done
+
+    conda deactivate
+  done
+}
+
+test_macos_wheels() {
+  local py_arches="2.7m 3.5m 3.6m 3.7m 3.8"
+
+  for py_arch in ${py_arches}; do
+    local env=_verify_wheel-${py_arch}
+    conda create -yq -n ${env} python=${py_arch//m/}
+    conda activate ${env}
+
+    macos_suffix=macosx
+    case "${py_arch}" in
+    *m)
+      macos_suffix="${macos_suffix}_10_6_intel"
+      ;;
+    *)
+      macos_suffix="${macos_suffix}_10_9_x86_64"
+      ;;
+    esac
+    pip install python-rc/${VERSION}-rc${RC_NUMBER}/pyarrow-${VERSION}-cp${py_arch//[m.]/}-cp${py_arch//./}-${macos_suffix}.whl
+
+    check_python_imports py_arch
+
+    conda deactivate
+  done
+}
+
+test_wheels() {
+  local download_dir=binaries
+  mkdir -p ${download_dir}
+
+  if [ "$(uname)" == "Darwin" ]; then
+    local filter_regex=.*macosx.*
+  else
+    local filter_regex=.*manylinux.*
+  fi
+
+  conda create -yq -n py3-base python=3.7
+  conda activate py3-base
+
+  python3 $SOURCE_DIR/download_rc_binaries.py $VERSION $RC_NUMBER \
+          --regex=${filter_regex} \
+          --dest=${download_dir}
+
+  verify_dir_artifact_signatures ${download_dir}
+
+  pushd ${download_dir}
+
+  if [ "$(uname)" == "Darwin" ]; then
+    test_macos_wheels
+  else
+    test_linux_wheels
+  fi
+
+  popd
+}
+
+# By default test all functionalities.
+# To deactivate one test, deactivate the test and all of its dependents
+# To explicitly select one test, set TEST_DEFAULT=0 TEST_X=1
+: ${TEST_DEFAULT:=1}
+: ${TEST_SOURCE:=${TEST_DEFAULT}}
+: ${TEST_JAVA:=${TEST_DEFAULT}}
+: ${TEST_CPP:=${TEST_DEFAULT}}
+: ${TEST_CSHARP:=${TEST_DEFAULT}}
+: ${TEST_GLIB:=${TEST_DEFAULT}}
+: ${TEST_RUBY:=${TEST_DEFAULT}}
+: ${TEST_PYTHON:=${TEST_DEFAULT}}
+: ${TEST_JS:=${TEST_DEFAULT}}
+: ${TEST_GO:=${TEST_DEFAULT}}
+: ${TEST_RUST:=${TEST_DEFAULT}}
+: ${TEST_INTEGRATION:=${TEST_DEFAULT}}
+: ${TEST_BINARY:=${TEST_DEFAULT}}
+: ${TEST_APT:=${TEST_DEFAULT}}
+: ${TEST_YUM:=${TEST_DEFAULT}}
+
+# For selective Integration testing, set TEST_DEFAULT=0 TEST_INTEGRATION_X=1 TEST_INTEGRATION_Y=1
+: ${TEST_INTEGRATION_CPP:=${TEST_INTEGRATION}}
+: ${TEST_INTEGRATION_JAVA:=${TEST_INTEGRATION}}
+: ${TEST_INTEGRATION_JS:=${TEST_INTEGRATION}}
+: ${TEST_INTEGRATION_GO:=${TEST_INTEGRATION}}
+
+# Automatically test if its activated by a dependent
+TEST_GLIB=$((${TEST_GLIB} + ${TEST_RUBY}))
+TEST_CPP=$((${TEST_CPP} + ${TEST_GLIB} + ${TEST_PYTHON} + ${TEST_INTEGRATION_CPP}))
+TEST_JAVA=$((${TEST_JAVA} + ${TEST_INTEGRATION_JAVA}))
+TEST_JS=$((${TEST_JS} + ${TEST_INTEGRATION_JS}))
+TEST_GO=$((${TEST_GO} + ${TEST_INTEGRATION_GO}))
+TEST_INTEGRATION=$((${TEST_INTEGRATION} + ${TEST_INTEGRATION_CPP} + ${TEST_INTEGRATION_JAVA} + ${TEST_INTEGRATION_JS} + ${TEST_INTEGRATION_GO}))
+
+: ${TEST_ARCHIVE:=apache-arrow-${VERSION}.tar.gz}
+case "${TEST_ARCHIVE}" in
+  /*)
+   ;;
+  *)
+   TEST_ARCHIVE=${PWD}/${TEST_ARCHIVE}
+   ;;
+esac
+
+TEST_SUCCESS=no
+
+setup_tempdir "arrow-${VERSION}"
+echo "Working in sandbox ${TMPDIR}"
+cd ${TMPDIR}
+
+if [ "${ARTIFACT}" == "source" ]; then
+  dist_name="apache-arrow-${VERSION}"
+  if [ ${TEST_SOURCE} -gt 0 ]; then
+    import_gpg_keys
+    fetch_archive ${dist_name}
+    tar xf ${dist_name}.tar.gz
+  else
+    mkdir -p ${dist_name}
+    tar xf ${TEST_ARCHIVE} -C ${dist_name} --strip-components=1
+  fi
+  pushd ${dist_name}
+  test_source_distribution
+  popd
+elif [ "${ARTIFACT}" == "wheels" ]; then
+  import_gpg_keys
+  setup_miniconda
+  test_wheels
+else
+  import_gpg_keys
+  test_binary_distribution
 fi
 
+TEST_SUCCESS=yes
 echo 'Release candidate looks good!'
 exit 0

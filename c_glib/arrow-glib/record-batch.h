@@ -24,47 +24,16 @@
 
 G_BEGIN_DECLS
 
-#define GARROW_TYPE_RECORD_BATCH                \
-  (garrow_record_batch_get_type())
-#define GARROW_RECORD_BATCH(obj)                        \
-  (G_TYPE_CHECK_INSTANCE_CAST((obj),                    \
-                              GARROW_TYPE_RECORD_BATCH, \
-                              GArrowRecordBatch))
-#define GARROW_RECORD_BATCH_CLASS(klass)                \
-  (G_TYPE_CHECK_CLASS_CAST((klass),                     \
-                           GARROW_TYPE_RECORD_BATCH,    \
-                           GArrowRecordBatchClass))
-#define GARROW_IS_RECORD_BATCH(obj)                             \
-  (G_TYPE_CHECK_INSTANCE_TYPE((obj),                            \
-                              GARROW_TYPE_RECORD_BATCH))
-#define GARROW_IS_RECORD_BATCH_CLASS(klass)             \
-  (G_TYPE_CHECK_CLASS_TYPE((klass),                     \
-                           GARROW_TYPE_RECORD_BATCH))
-#define GARROW_RECORD_BATCH_GET_CLASS(obj)              \
-  (G_TYPE_INSTANCE_GET_CLASS((obj),                     \
-                             GARROW_TYPE_RECORD_BATCH,  \
-                             GArrowRecordBatchClass))
-
-typedef struct _GArrowRecordBatch         GArrowRecordBatch;
-typedef struct _GArrowRecordBatchClass    GArrowRecordBatchClass;
-
-/**
- * GArrowRecordBatch:
- *
- * It wraps `arrow::RecordBatch`.
- */
-struct _GArrowRecordBatch
-{
-  /*< private >*/
-  GObject parent_instance;
-};
-
+#define GARROW_TYPE_RECORD_BATCH (garrow_record_batch_get_type())
+G_DECLARE_DERIVABLE_TYPE(GArrowRecordBatch,
+                         garrow_record_batch,
+                         GARROW,
+                         RECORD_BATCH,
+                         GObject)
 struct _GArrowRecordBatchClass
 {
   GObjectClass parent_class;
 };
-
-GType garrow_record_batch_get_type(void) G_GNUC_CONST;
 
 GArrowRecordBatch *garrow_record_batch_new(GArrowSchema *schema,
                                            guint32 n_rows,
@@ -75,9 +44,9 @@ gboolean garrow_record_batch_equal(GArrowRecordBatch *record_batch,
                                    GArrowRecordBatch *other_record_batch);
 
 GArrowSchema *garrow_record_batch_get_schema     (GArrowRecordBatch *record_batch);
-GArrowArray  *garrow_record_batch_get_column     (GArrowRecordBatch *record_batch,
+GARROW_AVAILABLE_IN_1_0
+GArrowArray  *garrow_record_batch_get_column_data(GArrowRecordBatch *record_batch,
                                                   gint i);
-GList        *garrow_record_batch_get_columns    (GArrowRecordBatch *record_batch);
 const gchar  *garrow_record_batch_get_column_name(GArrowRecordBatch *record_batch,
                                                   gint i);
 guint         garrow_record_batch_get_n_columns  (GArrowRecordBatch *record_batch);

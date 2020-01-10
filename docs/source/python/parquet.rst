@@ -37,7 +37,7 @@ which includes a native, multithreaded C++ adapter to and from in-memory Arrow
 data. PyArrow includes Python bindings to this code, which thus enables reading
 and writing Parquet files with pandas as well.
 
-Obtaining PyArrow with Parquet Support
+Obtaining pyarrow with Parquet Support
 --------------------------------------
 
 If you installed ``pyarrow`` with pip or conda, it should be built with Parquet
@@ -49,8 +49,8 @@ support bundled:
 
 If you are building ``pyarrow`` from source, you must use
 ``-DARROW_PARQUET=ON`` when compiling the C++ libraries and enable the Parquet
-extensions when building ``pyarrow``. See the :ref:`Development <development>`
-page for more details.
+extensions when building ``pyarrow``. See the :ref:`Python Development
+<python-development>` page for more details.
 
 Reading and Writing Single Files
 --------------------------------
@@ -111,6 +111,23 @@ We need not use a string to specify the origin of the file. It can be any of:
 In general, a Python file object will have the worst read performance, while a
 string file path or an instance of :class:`~.NativeFile` (especially memory
 maps) will perform the best.
+
+Parquet file writing options
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:func:`~pyarrow.parquet.write_table()` has a number of options to
+control various settings when writing a Parquet file.
+
+* ``version``, the Parquet format version to use, whether ``'1.0'``
+  for compatibility with older readers, or ``'2.0'`` to unlock more
+  recent features.
+* ``data_page_size``, to control the approximate size of encoded data
+  pages within a column chunk. This currently defaults to 1MB
+* ``flavor``, to set compatibility options particular to a Parquet
+  consumer like ``'spark'`` for Apache Spark.
+
+There are some additional data type handling-specific options
+described below.
 
 Omitting the DataFrame index
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -193,6 +210,19 @@ Alternatively python ``with`` syntax can also be use:
 Data Type Handling
 ------------------
 
+Reading types as DictionaryArray
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``read_dictionary`` option in ``read_table`` and ``ParquetDataset`` will
+cause columns to be read as ``DictionaryArray``, which will become
+``pandas.Categorical`` when converted to pandas. This option is only valid for
+string and binary column types, and it can yield significantly lower memory use
+and improved performance for columns with many repeated string values.
+
+.. code-block:: python
+
+   pq.read_table(table, where, read_dictionary=['binary_c0', 'stringb_c2'])
+
 Storing timestamps
 ~~~~~~~~~~~~~~~~~~
 
@@ -213,6 +243,16 @@ an exception will be raised. This can be suppressed by passing
 
    pq.write_table(table, where, coerce_timestamps='ms',
                   allow_truncated_timestamps=True)
+
+Older Parquet implementations use ``INT96`` based storage of
+timestamps, but this is now deprecated. This includes some older
+versions of Apache Impala and Apache Spark. To write timestamps in
+this format, set the ``use_deprecated_int96_timestamps`` option to
+``True`` in ``write_table``.
+
+.. code-block:: python
+
+   pq.write_table(table, where, use_deprecated_int96_timestamps=True)
 
 Compression, Encoding, and File Compatibility
 ---------------------------------------------
@@ -278,7 +318,7 @@ A dataset partitioned by year and month may look like on disk:
      ...
 
 Writing to Partitioned Datasets
-------------------------------------------------
+-------------------------------
 
 You can write a partitioned dataset for any ``pyarrow`` file system that is a
 file-store (e.g. local, HDFS, S3). The default behaviour when no filesystem is
@@ -347,16 +387,18 @@ sanitize field characters unsupported by Spark SQL.
 Multithreaded Reads
 -------------------
 
-Each of the reading functions have an ``nthreads`` argument which will read
-columns with the indicated level of parallelism. Depending on the speed of IO
+Each of the reading functions by default use multi-threading for reading
+columns in parallel. Depending on the speed of IO
 and how expensive it is to decode the columns in a particular file
 (particularly with GZIP compression), this can yield significantly higher data
-throughput:
+throughput.
 
-.. code-block:: python
+This can be disabled by specifying ``use_threads=False``.
 
-   pq.read_table(where, nthreads=4)
-   pq.ParquetDataset(where).read(nthreads=4)
+.. note::
+   The number of threads to use concurrently is automatically inferred by Arrow
+   and can be inspected using the :func:`~pyarrow.cpu_count()` function.
+
 
 Reading a Parquet File from Azure Blob storage
 ----------------------------------------------

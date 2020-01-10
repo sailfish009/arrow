@@ -66,7 +66,7 @@
 
 namespace gandiva {
 
-extern const char kPrecompiledBitcode[];
+extern const unsigned char kPrecompiledBitcode[];
 extern const size_t kPrecompiledBitcodeSize;
 
 std::once_flag init_once_flag;
@@ -92,6 +92,7 @@ void Engine::InitOnce() {
 /// factory method to construct the engine.
 Status Engine::Make(std::shared_ptr<Configuration> config,
                     std::unique_ptr<Engine>* engine) {
+  static auto host_cpu_name = llvm::sys::getHostCPUName();
   std::unique_ptr<Engine> engine_obj(new Engine());
 
   std::call_once(init_once_flag, [&engine_obj] { engine_obj->InitOnce(); });
@@ -105,6 +106,7 @@ Status Engine::Make(std::shared_ptr<Configuration> config,
   engine_obj->module_ = cg_module.get();
 
   llvm::EngineBuilder engineBuilder(std::move(cg_module));
+  engineBuilder.setMCPU(host_cpu_name);
   engineBuilder.setEngineKind(llvm::EngineKind::JIT);
   engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
   engineBuilder.setErrorStr(&(engine_obj->llvm_error_));
@@ -130,7 +132,8 @@ Status Engine::Make(std::shared_ptr<Configuration> config,
 
 // Handling for pre-compiled IR libraries.
 Status Engine::LoadPreCompiledIR() {
-  auto bitcode = llvm::StringRef(kPrecompiledBitcode, kPrecompiledBitcodeSize);
+  auto bitcode = llvm::StringRef(reinterpret_cast<const char*>(kPrecompiledBitcode),
+                                 kPrecompiledBitcodeSize);
 
   /// Read from file into memory buffer.
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer_or_error =
@@ -146,11 +149,12 @@ Status Engine::LoadPreCompiledIR() {
   llvm::Expected<std::unique_ptr<llvm::Module>> module_or_error =
       llvm::getOwningLazyBitcodeModule(move(buffer), *context());
   if (!module_or_error) {
-    std::string error_string;
-    llvm::handleAllErrors(module_or_error.takeError(), [&](llvm::ErrorInfoBase& eib) {
-      error_string = eib.message();
-    });
-    return Status::CodeGenError(error_string);
+    // NOTE: llvm::handleAllErrors() fails linking with RTTI-disabled LLVM builds
+    // (ARROW-5148)
+    std::string str;
+    llvm::raw_string_ostream stream(str);
+    stream << module_or_error.takeError();
+    return Status::CodeGenError(stream.str());
   }
   std::unique_ptr<llvm::Module> ir_module = move(module_or_error.get());
 
@@ -187,7 +191,7 @@ Status Engine::RemoveUnusedFunctions() {
 }
 
 // Optimise and compile the module.
-Status Engine::FinalizeModule(bool optimise_ir, bool dump_ir) {
+Status Engine::FinalizeModule(bool optimise_ir, bool dump_ir, std::string* final_ir) {
   auto status = RemoveUnusedFunctions();
   ARROW_RETURN_NOT_OK(status);
 
@@ -223,7 +227,10 @@ Status Engine::FinalizeModule(bool optimise_ir, bool dump_ir) {
       DumpIR("After optimise");
     }
   }
-
+  if (final_ir != nullptr) {
+    llvm::raw_string_ostream stream(*final_ir);
+    module_->print(stream, nullptr);
+  }
   ARROW_RETURN_IF(llvm::verifyModule(*module_, &llvm::errs()),
                   Status::CodeGenError("Module verification failed after optimizer"));
 

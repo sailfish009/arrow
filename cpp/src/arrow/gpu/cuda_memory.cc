@@ -27,6 +27,7 @@
 
 #include "arrow/buffer.h"
 #include "arrow/io/memory.h"
+#include "arrow/memory_pool.h"
 #include "arrow/status.h"
 #include "arrow/util/logging.h"
 
@@ -99,7 +100,7 @@ CudaBuffer::CudaBuffer(uint8_t* data, int64_t size,
   mutable_data_ = data;
 }
 
-CudaBuffer::~CudaBuffer() { DCHECK(Close().ok()); }
+CudaBuffer::~CudaBuffer() { ARROW_CHECK_OK(Close()); }
 
 Status CudaBuffer::Close() {
   if (own_data_) {
@@ -153,20 +154,26 @@ Status CudaBuffer::CopyToHost(const int64_t position, const int64_t nbytes,
 
 Status CudaBuffer::CopyFromHost(const int64_t position, const void* data,
                                 int64_t nbytes) {
-  DCHECK_LE(nbytes, size_ - position) << "Copy would overflow buffer";
+  if (nbytes > size_ - position) {
+    return Status::Invalid("Copy would overflow buffer");
+  }
   return context_->CopyHostToDevice(mutable_data_ + position, data, nbytes);
 }
 
 Status CudaBuffer::CopyFromDevice(const int64_t position, const void* data,
                                   int64_t nbytes) {
-  DCHECK_LE(nbytes, size_ - position) << "Copy would overflow buffer";
+  if (nbytes > size_ - position) {
+    return Status::Invalid("Copy would overflow buffer");
+  }
   return context_->CopyDeviceToDevice(mutable_data_ + position, data, nbytes);
 }
 
 Status CudaBuffer::CopyFromAnotherDevice(const std::shared_ptr<CudaContext>& src_ctx,
                                          const int64_t position, const void* data,
                                          int64_t nbytes) {
-  DCHECK_LE(nbytes, size_ - position) << "Copy would overflow buffer";
+  if (nbytes > size_ - position) {
+    return Status::Invalid("Copy would overflow buffer");
+  }
   return src_ctx->CopyDeviceToAnotherDevice(context_, mutable_data_ + position, data,
                                             nbytes);
 }
@@ -182,8 +189,8 @@ Status CudaBuffer::ExportForIpc(std::shared_ptr<CudaIpcMemHandle>* handle) {
 
 CudaHostBuffer::~CudaHostBuffer() {
   CudaDeviceManager* manager = nullptr;
-  DCHECK(CudaDeviceManager::GetInstance(&manager).ok());
-  DCHECK(manager->FreeHost(mutable_data_, size_).ok());
+  ARROW_CHECK_OK(CudaDeviceManager::GetInstance(&manager));
+  ARROW_CHECK_OK(manager->FreeHost(mutable_data_, size_));
 }
 
 // ----------------------------------------------------------------------
@@ -199,19 +206,30 @@ CudaBufferReader::CudaBufferReader(const std::shared_ptr<Buffer>& buffer)
 
 CudaBufferReader::~CudaBufferReader() {}
 
-Status CudaBufferReader::Read(int64_t nbytes, int64_t* bytes_read, void* buffer) {
-  nbytes = std::min(nbytes, size_ - position_);
-  *bytes_read = nbytes;
-  RETURN_NOT_OK(context_->CopyDeviceToHost(buffer, data_ + position_, nbytes));
-  position_ += nbytes;
-  return Status::OK();
+Result<int64_t> CudaBufferReader::DoReadAt(int64_t position, int64_t nbytes,
+                                           void* buffer) {
+  nbytes = std::min(nbytes, size_ - position);
+  RETURN_NOT_OK(context_->CopyDeviceToHost(buffer, data_ + position, nbytes));
+  return nbytes;
 }
 
-Status CudaBufferReader::Read(int64_t nbytes, std::shared_ptr<Buffer>* out) {
+Result<int64_t> CudaBufferReader::DoRead(int64_t nbytes, void* buffer) {
+  ARROW_ASSIGN_OR_RAISE(int64_t bytes_read, DoReadAt(position_, nbytes, buffer));
+  position_ += bytes_read;
+  return bytes_read;
+}
+
+Result<std::shared_ptr<Buffer>> CudaBufferReader::DoReadAt(int64_t position,
+                                                           int64_t nbytes) {
+  int64_t size = std::min(nbytes, size_ - position);
+  return std::make_shared<CudaBuffer>(cuda_buffer_, position, size);
+}
+
+Result<std::shared_ptr<Buffer>> CudaBufferReader::DoRead(int64_t nbytes) {
   int64_t size = std::min(nbytes, size_ - position_);
-  *out = std::make_shared<CudaBuffer>(cuda_buffer_, position_, size);
+  auto buffer = std::make_shared<CudaBuffer>(cuda_buffer_, position_, size);
   position_ += size;
-  return Status::OK();
+  return buffer;
 }
 
 // ----------------------------------------------------------------------
@@ -225,7 +243,7 @@ class CudaBufferWriter::CudaBufferWriterImpl {
         buffer_size_(0),
         buffer_position_(0) {
     buffer_ = buffer;
-    DCHECK(buffer->is_mutable()) << "Must pass mutable buffer";
+    ARROW_CHECK(buffer->is_mutable()) << "Must pass mutable buffer";
     mutable_data_ = buffer->mutable_data();
     size_ = buffer->size();
     position_ = 0;
@@ -272,10 +290,9 @@ class CudaBufferWriter::CudaBufferWriterImpl {
 
   bool closed() const { return closed_; }
 
-  Status Tell(int64_t* position) const {
+  Result<int64_t> Tell() const {
     CHECK_CLOSED();
-    *position = position_;
-    return Status::OK();
+    return position_;
   }
 
   Status Write(const void* data, int64_t nbytes) {
@@ -364,7 +381,7 @@ Status CudaBufferWriter::Seek(int64_t position) {
   return impl_->Seek(position);
 }
 
-Status CudaBufferWriter::Tell(int64_t* position) const { return impl_->Tell(position); }
+Result<int64_t> CudaBufferWriter::Tell() const { return impl_->Tell(); }
 
 Status CudaBufferWriter::Write(const void* data, int64_t nbytes) {
   return impl_->Write(data, nbytes);

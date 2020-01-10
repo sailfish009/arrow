@@ -516,7 +516,7 @@ impl BitReader {
                     self.byte_offset += 4 * num_bits;
                     for n in 0..32 {
                         // We need to copy from smaller size to bigger size to avoid
-                        // overwritting other memory regions.
+                        // overwriting other memory regions.
                         if size_of::<T>() > size_of::<u32>() {
                             ::std::ptr::copy_nonoverlapping(
                                 out_buf[n..].as_ptr() as *const u32,
@@ -938,8 +938,8 @@ mod tests {
         for s in SIZE {
             for i in 0..33 {
                 match i {
-                    0...8 => test_get_batch_helper::<u8>(*s, i),
-                    9...16 => test_get_batch_helper::<u16>(*s, i),
+                    0..=8 => test_get_batch_helper::<u8>(*s, i),
+                    9..=16 => test_get_batch_helper::<u16>(*s, i),
                     _ => test_get_batch_helper::<u32>(*s, i),
                 }
             }

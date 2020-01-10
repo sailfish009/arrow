@@ -15,29 +15,45 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Logical query plan
+//! This module provides a logical query plan enum that can describe queries. Logical query
+//! plans can be created from a SQL statement or built programmatically via the Table API.
+//!
+//! Logical query plans can then be optimized and executed directly, or translated into
+//! physical query plans and executed.
 
 use std::fmt;
-use std::fmt::{Error, Formatter};
 use std::sync::Arc;
 
-use arrow::datatypes::*;
+use arrow::datatypes::{DataType, Field, Schema};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+use crate::error::{ExecutionError, Result};
+use crate::optimizer::utils;
+use crate::sql::parser::FileType;
+
+/// Enumeration of supported function types (Scalar and Aggregate)
+#[derive(Debug, Clone)]
 pub enum FunctionType {
+    /// Simple function returning a value per DataFrame
     Scalar,
+    /// Aggregate functions produce a value by sampling multiple DataFrames
     Aggregate,
 }
 
+/// Logical representation of a UDF (user-defined function)
 #[derive(Debug, Clone)]
 pub struct FunctionMeta {
+    /// Function name
     name: String,
+    /// Function arguments
     args: Vec<Field>,
+    /// Function return type
     return_type: DataType,
+    /// Function type (Scalar or Aggregate)
     function_type: FunctionType,
 }
 
 impl FunctionMeta {
+    #[allow(missing_docs)]
     pub fn new(
         name: String,
         args: Vec<Field>,
@@ -51,68 +67,96 @@ impl FunctionMeta {
             function_type,
         }
     }
+    /// Getter for the function name
     pub fn name(&self) -> &String {
         &self.name
     }
+    /// Getter for the arg list
     pub fn args(&self) -> &Vec<Field> {
         &self.args
     }
+    /// Getter for the `DataType` the function returns
     pub fn return_type(&self) -> &DataType {
         &self.return_type
     }
+    /// Getter for the `FunctionType`
     pub fn function_type(&self) -> &FunctionType {
         &self.function_type
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// Operators applied to expressions
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operator {
+    /// Expressions are equal
     Eq,
+    /// Expressions are not equal
     NotEq,
+    /// Left side is smaller than right side
     Lt,
+    /// Left side is smaller or equal to right side
     LtEq,
+    /// Left side is greater than right side
     Gt,
+    /// Left side is greater or equal to right side
     GtEq,
+    /// Addition
     Plus,
+    /// Subtraction
     Minus,
+    /// Multiplication operator, like `*`
     Multiply,
+    /// Division operator, like `/`
     Divide,
+    /// Remainder operator, like `%`
     Modulus,
+    /// Logical AND, like `&&`
     And,
+    /// Logical OR, like `||`
     Or,
+    /// Logical NOT, like `!`
     Not,
+    /// Matches a wildcard pattern
     Like,
+    /// Does not match a wildcard pattern
     NotLike,
 }
 
-impl Operator {
-    /// Get the result type of applying this operation to its left and right inputs
-    pub fn get_datatype(&self, l: &Expr, _r: &Expr, schema: &Schema) -> DataType {
-        //TODO: implement correctly, just go with left side for now
-        l.get_type(schema).clone()
-    }
-}
-
 /// ScalarValue enumeration
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
+    /// null value
     Null,
+    /// true or false value
     Boolean(bool),
+    /// 32bit float
     Float32(f32),
+    /// 64bit float
     Float64(f64),
+    /// signed 8bit int
     Int8(i8),
+    /// signed 16bit int
     Int16(i16),
+    /// signed 32bit int
     Int32(i32),
+    /// signed 64bit int
     Int64(i64),
+    /// unsigned 8bit int
     UInt8(u8),
+    /// unsigned 16bit int
     UInt16(u16),
+    /// unsigned 32bit int
     UInt32(u32),
+    /// unsigned 64bit int
     UInt64(u64),
+    /// utf-8 encoded string
     Utf8(Arc<String>),
+    /// List of scalars packed as a struct
     Struct(Vec<ScalarValue>),
 }
 
 impl ScalarValue {
+    /// Getter for the `DataType` of the value
     pub fn get_datatype(&self) -> DataType {
         match *self {
             ScalarValue::Boolean(_) => DataType::Boolean,
@@ -127,14 +171,13 @@ impl ScalarValue {
             ScalarValue::Float32(_) => DataType::Float32,
             ScalarValue::Float64(_) => DataType::Float64,
             ScalarValue::Utf8(_) => DataType::Utf8,
-            ScalarValue::Struct(_) => unimplemented!(),
-            ScalarValue::Null => unimplemented!(),
+            _ => panic!("Cannot treat {:?} as scalar value", self),
         }
     }
 }
 
-/// Relation Expression
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+/// Relation expression
+#[derive(Clone, PartialEq)]
 pub enum Expr {
     /// index into a value within the row or complex value
     Column(usize),
@@ -142,8 +185,11 @@ pub enum Expr {
     Literal(ScalarValue),
     /// binary expression e.g. "age > 21"
     BinaryExpr {
+        /// Left-hand side of the expression
         left: Arc<Expr>,
+        /// The comparison operator
         op: Operator,
+        /// Right-hand side of the expression
         right: Arc<Expr>,
     },
     /// unary IS NOT NULL
@@ -152,26 +198,40 @@ pub enum Expr {
     IsNull(Arc<Expr>),
     /// cast a value to a different type
     Cast {
+        /// The expression being cast
         expr: Arc<Expr>,
+        /// The `DataType` the expression will yield
         data_type: DataType,
     },
     /// sort expression
-    Sort { expr: Arc<Expr>, asc: bool },
+    Sort {
+        /// The expression to sort on
+        expr: Arc<Expr>,
+        /// The direction of the sort
+        asc: bool,
+    },
     /// scalar function
     ScalarFunction {
+        /// Name of the function
         name: String,
+        /// List of expressions to feed to the functions as arguments
         args: Vec<Expr>,
+        /// The `DataType` the expression will yield
         return_type: DataType,
     },
     /// aggregate function
     AggregateFunction {
+        /// Name of the function
         name: String,
+        /// List of expressions to feed to the functions as arguments
         args: Vec<Expr>,
+        /// The `DataType` the expression will yield
         return_type: DataType,
     },
 }
 
 impl Expr {
+    /// Find the `DataType` for the expression
     pub fn get_type(&self, schema: &Schema) -> DataType {
         match self {
             Expr::Column(n) => schema.field(*n).data_type().clone(),
@@ -185,28 +245,25 @@ impl Expr {
                 ref left,
                 ref right,
                 ref op,
-            } => {
-                match op {
-                    Operator::Eq | Operator::NotEq => DataType::Boolean,
-                    Operator::Lt | Operator::LtEq => DataType::Boolean,
-                    Operator::Gt | Operator::GtEq => DataType::Boolean,
-                    Operator::And | Operator::Or => DataType::Boolean,
-                    _ => {
-                        let left_type = left.get_type(schema);
-                        let right_type = right.get_type(schema);
-                        get_supertype(&left_type, &right_type).unwrap_or(DataType::Utf8) //TODO ???
-                    }
+            } => match op {
+                Operator::Eq | Operator::NotEq => DataType::Boolean,
+                Operator::Lt | Operator::LtEq => DataType::Boolean,
+                Operator::Gt | Operator::GtEq => DataType::Boolean,
+                Operator::And | Operator::Or => DataType::Boolean,
+                _ => {
+                    let left_type = left.get_type(schema);
+                    let right_type = right.get_type(schema);
+                    utils::get_supertype(&left_type, &right_type).unwrap()
                 }
-            }
+            },
             Expr::Sort { ref expr, .. } => expr.get_type(schema),
         }
     }
 
-    pub fn cast_to(
-        &self,
-        cast_to_type: &DataType,
-        schema: &Schema,
-    ) -> Result<Expr, String> {
+    /// Perform a type cast on the expression value.
+    ///
+    /// Will `Err` if the type cast cannot be performed.
+    pub fn cast_to(&self, cast_to_type: &DataType, schema: &Schema) -> Result<Expr> {
         let this_type = self.get_type(schema);
         if this_type == *cast_to_type {
             Ok(self.clone())
@@ -216,13 +273,14 @@ impl Expr {
                 data_type: cast_to_type.clone(),
             })
         } else {
-            Err(format!(
+            Err(ExecutionError::General(format!(
                 "Cannot automatically convert {:?} to {:?}",
                 this_type, cast_to_type
-            ))
+            )))
         }
     }
 
+    /// Equal
     pub fn eq(&self, other: &Expr) -> Expr {
         Expr::BinaryExpr {
             left: Arc::new(self.clone()),
@@ -231,6 +289,7 @@ impl Expr {
         }
     }
 
+    /// Not equal
     pub fn not_eq(&self, other: &Expr) -> Expr {
         Expr::BinaryExpr {
             left: Arc::new(self.clone()),
@@ -239,6 +298,7 @@ impl Expr {
         }
     }
 
+    /// Greater than
     pub fn gt(&self, other: &Expr) -> Expr {
         Expr::BinaryExpr {
             left: Arc::new(self.clone()),
@@ -247,6 +307,7 @@ impl Expr {
         }
     }
 
+    /// Greater than or equal to
     pub fn gt_eq(&self, other: &Expr) -> Expr {
         Expr::BinaryExpr {
             left: Arc::new(self.clone()),
@@ -255,6 +316,7 @@ impl Expr {
         }
     }
 
+    /// Less than
     pub fn lt(&self, other: &Expr) -> Expr {
         Expr::BinaryExpr {
             left: Arc::new(self.clone()),
@@ -263,6 +325,7 @@ impl Expr {
         }
     }
 
+    /// Less than or equal to
     pub fn lt_eq(&self, other: &Expr) -> Expr {
         Expr::BinaryExpr {
             left: Arc::new(self.clone()),
@@ -273,7 +336,7 @@ impl Expr {
 }
 
 impl fmt::Debug for Expr {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Expr::Column(i) => write!(f, "#{}", i),
             Expr::Literal(v) => write!(f, "{:?}", v),
@@ -320,43 +383,83 @@ impl fmt::Debug for Expr {
 
 /// The LogicalPlan represents different types of relations (such as Projection,
 /// Selection, etc) and can be created by the SQL query planner and the DataFrame API.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Clone)]
 pub enum LogicalPlan {
     /// A Projection (essentially a SELECT with an expression list)
     Projection {
+        /// The list of expressions
         expr: Vec<Expr>,
+        /// The incoming logic plan
         input: Arc<LogicalPlan>,
+        /// The schema description
         schema: Arc<Schema>,
     },
     /// A Selection (essentially a WHERE clause with a predicate expression)
-    Selection { expr: Expr, input: Arc<LogicalPlan> },
+    Selection {
+        /// The expression
+        expr: Expr,
+        /// The incoming logic plan
+        input: Arc<LogicalPlan>,
+    },
     /// Represents a list of aggregate expressions with optional grouping expressions
     Aggregate {
+        /// The incoming logic plan
         input: Arc<LogicalPlan>,
+        /// Grouping expressions
         group_expr: Vec<Expr>,
+        /// Aggregate expressions
         aggr_expr: Vec<Expr>,
+        /// The schema description
         schema: Arc<Schema>,
     },
     /// Represents a list of sort expressions to be applied to a relation
     Sort {
+        /// The sort expressions
         expr: Vec<Expr>,
+        /// The incoming logic plan
         input: Arc<LogicalPlan>,
+        /// The schema description
         schema: Arc<Schema>,
     },
     /// A table scan against a table that has been registered on a context
     TableScan {
+        /// The name of the schema
         schema_name: String,
+        /// The name of the table
         table_name: String,
-        schema: Arc<Schema>,
+        /// The underlying table schema
+        table_schema: Arc<Schema>,
+        /// The projected schema
+        projected_schema: Arc<Schema>,
+        /// Optional column indices to use as a projection
         projection: Option<Vec<usize>>,
     },
     /// An empty relation with an empty schema
-    EmptyRelation { schema: Arc<Schema> },
-    // Represents the maximum number of records to return
-    Limit {
-        expr: Expr,
-        input: Arc<LogicalPlan>,
+    EmptyRelation {
+        /// The schema description
         schema: Arc<Schema>,
+    },
+    /// Represents the maximum number of records to return
+    Limit {
+        /// The expression
+        expr: Expr,
+        /// The logical plan
+        input: Arc<LogicalPlan>,
+        /// The schema description
+        schema: Arc<Schema>,
+    },
+    /// Represents a create external table expression.
+    CreateExternalTable {
+        /// The table schema
+        schema: Arc<Schema>,
+        /// The table name
+        name: String,
+        /// The physical location
+        location: String,
+        /// The file type of physical file
+        file_type: FileType,
+        /// Whether the CSV file contains a header
+        header_row: bool,
     },
 }
 
@@ -365,18 +468,21 @@ impl LogicalPlan {
     pub fn schema(&self) -> &Arc<Schema> {
         match self {
             LogicalPlan::EmptyRelation { schema } => &schema,
-            LogicalPlan::TableScan { schema, .. } => &schema,
+            LogicalPlan::TableScan {
+                projected_schema, ..
+            } => &projected_schema,
             LogicalPlan::Projection { schema, .. } => &schema,
             LogicalPlan::Selection { input, .. } => input.schema(),
             LogicalPlan::Aggregate { schema, .. } => &schema,
             LogicalPlan::Sort { schema, .. } => &schema,
             LogicalPlan::Limit { schema, .. } => &schema,
+            LogicalPlan::CreateExternalTable { schema, .. } => &schema,
         }
     }
 }
 
 impl LogicalPlan {
-    fn fmt_with_indent(&self, f: &mut Formatter, indent: usize) -> Result<(), Error> {
+    fn fmt_with_indent(&self, f: &mut fmt::Formatter, indent: usize) -> fmt::Result {
         if indent > 0 {
             writeln!(f)?;
             for _ in 0..indent {
@@ -447,174 +553,68 @@ impl LogicalPlan {
                 write!(f, "Limit: {:?}", expr)?;
                 input.fmt_with_indent(f, indent + 1)
             }
+            LogicalPlan::CreateExternalTable { ref name, .. } => {
+                write!(f, "CreateExternalTable: {:?}", name)
+            }
         }
     }
 }
 
 impl fmt::Debug for LogicalPlan {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.fmt_with_indent(f, 0)
     }
 }
 
-//TODO move to Arrow DataType impl?
-pub fn get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
-    match _get_supertype(l, r) {
-        Some(dt) => Some(dt),
-        None => match _get_supertype(r, l) {
-            Some(dt) => Some(dt),
-            None => None,
-        },
-    }
-}
-
-fn _get_supertype(l: &DataType, r: &DataType) -> Option<DataType> {
+/// Verify a given type cast can be performed
+pub fn can_coerce_from(type_into: &DataType, type_from: &DataType) -> bool {
     use self::DataType::*;
-    match (l, r) {
-        (UInt8, Int8) => Some(Int8),
-        (UInt8, Int16) => Some(Int16),
-        (UInt8, Int32) => Some(Int32),
-        (UInt8, Int64) => Some(Int64),
-
-        (UInt16, Int16) => Some(Int16),
-        (UInt16, Int32) => Some(Int32),
-        (UInt16, Int64) => Some(Int64),
-
-        (UInt32, Int32) => Some(Int32),
-        (UInt32, Int64) => Some(Int64),
-
-        (UInt64, Int64) => Some(Int64),
-
-        (Int8, UInt8) => Some(Int8),
-
-        (Int16, UInt8) => Some(Int16),
-        (Int16, UInt16) => Some(Int16),
-
-        (Int32, UInt8) => Some(Int32),
-        (Int32, UInt16) => Some(Int32),
-        (Int32, UInt32) => Some(Int32),
-
-        (Int64, UInt8) => Some(Int64),
-        (Int64, UInt16) => Some(Int64),
-        (Int64, UInt32) => Some(Int64),
-        (Int64, UInt64) => Some(Int64),
-
-        (UInt8, UInt8) => Some(UInt8),
-        (UInt8, UInt16) => Some(UInt16),
-        (UInt8, UInt32) => Some(UInt32),
-        (UInt8, UInt64) => Some(UInt64),
-        (UInt8, Float32) => Some(Float32),
-        (UInt8, Float64) => Some(Float64),
-
-        (UInt16, UInt8) => Some(UInt16),
-        (UInt16, UInt16) => Some(UInt16),
-        (UInt16, UInt32) => Some(UInt32),
-        (UInt16, UInt64) => Some(UInt64),
-        (UInt16, Float32) => Some(Float32),
-        (UInt16, Float64) => Some(Float64),
-
-        (UInt32, UInt8) => Some(UInt32),
-        (UInt32, UInt16) => Some(UInt32),
-        (UInt32, UInt32) => Some(UInt32),
-        (UInt32, UInt64) => Some(UInt64),
-        (UInt32, Float32) => Some(Float32),
-        (UInt32, Float64) => Some(Float64),
-
-        (UInt64, UInt8) => Some(UInt64),
-        (UInt64, UInt16) => Some(UInt64),
-        (UInt64, UInt32) => Some(UInt64),
-        (UInt64, UInt64) => Some(UInt64),
-        (UInt64, Float32) => Some(Float32),
-        (UInt64, Float64) => Some(Float64),
-
-        (Int8, Int8) => Some(Int8),
-        (Int8, Int16) => Some(Int16),
-        (Int8, Int32) => Some(Int32),
-        (Int8, Int64) => Some(Int64),
-        (Int8, Float32) => Some(Float32),
-        (Int8, Float64) => Some(Float64),
-
-        (Int16, Int8) => Some(Int16),
-        (Int16, Int16) => Some(Int16),
-        (Int16, Int32) => Some(Int32),
-        (Int16, Int64) => Some(Int64),
-        (Int16, Float32) => Some(Float32),
-        (Int16, Float64) => Some(Float64),
-
-        (Int32, Int8) => Some(Int32),
-        (Int32, Int16) => Some(Int32),
-        (Int32, Int32) => Some(Int32),
-        (Int32, Int64) => Some(Int64),
-        (Int32, Float32) => Some(Float32),
-        (Int32, Float64) => Some(Float64),
-
-        (Int64, Int8) => Some(Int64),
-        (Int64, Int16) => Some(Int64),
-        (Int64, Int32) => Some(Int64),
-        (Int64, Int64) => Some(Int64),
-        (Int64, Float32) => Some(Float32),
-        (Int64, Float64) => Some(Float64),
-
-        (Float32, Float32) => Some(Float32),
-        (Float32, Float64) => Some(Float64),
-        (Float64, Float32) => Some(Float64),
-        (Float64, Float64) => Some(Float64),
-
-        (Utf8, Utf8) => Some(Utf8),
-
-        (Boolean, Boolean) => Some(Boolean),
-
-        _ => None,
-    }
-}
-
-pub fn can_coerce_from(left: &DataType, other: &DataType) -> bool {
-    use self::DataType::*;
-    match left {
-        Int8 => match other {
+    match type_into {
+        Int8 => match type_from {
             Int8 => true,
             _ => false,
         },
-        Int16 => match other {
-            Int8 | Int16 => true,
+        Int16 => match type_from {
+            Int8 | Int16 | UInt8 => true,
             _ => false,
         },
-        Int32 => match other {
-            Int8 | Int16 | Int32 => true,
+        Int32 => match type_from {
+            Int8 | Int16 | Int32 | UInt8 | UInt16 => true,
             _ => false,
         },
-        Int64 => match other {
-            Int8 | Int16 | Int32 | Int64 => true,
+        Int64 => match type_from {
+            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 => true,
             _ => false,
         },
-        UInt8 => match other {
+        UInt8 => match type_from {
             UInt8 => true,
             _ => false,
         },
-        UInt16 => match other {
+        UInt16 => match type_from {
             UInt8 | UInt16 => true,
             _ => false,
         },
-        UInt32 => match other {
+        UInt32 => match type_from {
             UInt8 | UInt16 | UInt32 => true,
             _ => false,
         },
-        UInt64 => match other {
+        UInt64 => match type_from {
             UInt8 | UInt16 | UInt32 | UInt64 => true,
             _ => false,
         },
-        Float32 => match other {
+        Float32 => match type_from {
             Int8 | Int16 | Int32 | Int64 => true,
             UInt8 | UInt16 | UInt32 | UInt64 => true,
             Float32 => true,
             _ => false,
         },
-        Float64 => match other {
+        Float64 => match type_from {
             Int8 | Int16 | Int32 | Int64 => true,
             UInt8 | UInt16 | UInt32 | UInt64 => true,
             Float32 | Float64 => true,
             _ => false,
         },
+        Utf8 => true,
         _ => false,
     }
 }
@@ -622,7 +622,6 @@ pub fn can_coerce_from(left: &DataType, other: &DataType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json;
     use std::thread;
 
     #[test]
@@ -631,7 +630,8 @@ mod tests {
         let plan = Arc::new(LogicalPlan::TableScan {
             schema_name: "".to_string(),
             table_name: "people".to_string(),
-            schema: Arc::new(schema),
+            table_schema: Arc::new(schema.clone()),
+            projected_schema: Arc::new(schema),
             projection: Some(vec![0, 1, 4]),
         });
 
@@ -640,46 +640,5 @@ mod tests {
         thread::spawn(move || {
             println!("plan: {:?}", plan1);
         });
-    }
-
-    #[test]
-    fn serialize_plan() {
-        let schema = Schema::new(vec![
-            Field::new("first_name", DataType::Utf8, false),
-            Field::new("last_name", DataType::Utf8, false),
-            Field::new(
-                "address",
-                DataType::Struct(vec![
-                    Field::new("street", DataType::Utf8, false),
-                    Field::new("zip", DataType::UInt16, false),
-                ]),
-                false,
-            ),
-        ]);
-
-        let plan = LogicalPlan::TableScan {
-            schema_name: "".to_string(),
-            table_name: "people".to_string(),
-            schema: Arc::new(schema),
-            projection: Some(vec![0, 1, 4]),
-        };
-
-        let serialized = serde_json::to_string(&plan).unwrap();
-
-        assert_eq!(
-            "{\"TableScan\":{\
-             \"schema_name\":\"\",\
-             \"table_name\":\"people\",\
-             \"schema\":{\"fields\":[\
-             {\"name\":\"first_name\",\"data_type\":\"Utf8\",\"nullable\":false},\
-             {\"name\":\"last_name\",\"data_type\":\"Utf8\",\"nullable\":false},\
-             {\"name\":\"address\",\"data_type\":{\"Struct\":\
-             [\
-             {\"name\":\"street\",\"data_type\":\"Utf8\",\"nullable\":false},\
-             {\"name\":\"zip\",\"data_type\":\"UInt16\",\"nullable\":false}]},\"nullable\":false}\
-             ]},\
-             \"projection\":[0,1,4]}}",
-            serialized
-        );
     }
 }

@@ -22,7 +22,6 @@ add_custom_target(plasma-tests)
 add_dependencies(plasma-all plasma plasma-tests plasma-benchmarks)
 
 # For the moment, Plasma is versioned like Arrow
-project(plasma VERSION "${ARROW_BASE_VERSION}")
 set(PLASMA_VERSION "${ARROW_VERSION}")
 
 find_package(Threads)
@@ -31,53 +30,26 @@ find_package(Threads)
 set(PLASMA_SO_VERSION "${ARROW_SO_VERSION}")
 set(PLASMA_FULL_SO_VERSION "${ARROW_FULL_SO_VERSION}")
 
-include_directories("${FLATBUFFERS_INCLUDE_DIR}" "${CMAKE_CURRENT_LIST_DIR}/"
-                    "${CMAKE_CURRENT_LIST_DIR}/thirdparty/"
-                    "${CMAKE_CURRENT_LIST_DIR}/../")
-
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-conversion")
-
-# Compile flatbuffers
-
-set(PLASMA_FBS_SRC "${CMAKE_CURRENT_LIST_DIR}/format/plasma.fbs"
-    "${CMAKE_CURRENT_LIST_DIR}/format/common.fbs")
-set(OUTPUT_DIR ${ARROW_BINARY_DIR}/src/plasma)
-
-set(PLASMA_FBS_OUTPUT_FILES "${OUTPUT_DIR}/common_generated.h"
-    "${OUTPUT_DIR}/plasma_generated.h")
-
-add_custom_target(gen_plasma_fbs DEPENDS ${PLASMA_FBS_OUTPUT_FILES})
-
-if(FLATBUFFERS_VENDORED)
-  add_dependencies(gen_plasma_fbs flatbuffers_ep)
-endif()
-
-add_custom_command(
-  OUTPUT ${PLASMA_FBS_OUTPUT_FILES}
-         # The --gen-object-api flag generates a C++ class MessageT for each
-         # flatbuffers message Message, which can be used to store deserialized
-         # messages in data structures. This is currently used for ObjectInfo for
-         # example.
-  COMMAND ${FLATBUFFERS_COMPILER} -c -o ${OUTPUT_DIR} ${PLASMA_FBS_SRC}
-          --gen-object-api
-          --scoped-enums
-  DEPENDS ${PLASMA_FBS_SRC}
-  COMMENT "Running flatc compiler on ${PLASMA_FBS_SRC}"
-  VERBATIM)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
 
 set(PLASMA_SRCS
     client.cc
     common.cc
-    eviction_policy.cc
-    events.cc
     fling.cc
     io.cc
     malloc.cc
     plasma.cc
+    protocol.cc)
+
+set(PLASMA_STORE_SRCS
+    dlmalloc.cc
+    events.cc
+    eviction_policy.cc
+    quota_aware_policy.cc
     plasma_allocator.cc
-    protocol.cc
+    store.cc
     thirdparty/ae/ae.c)
 
 set(PLASMA_LINK_LIBS arrow_shared)
@@ -89,13 +61,25 @@ if(ARROW_CUDA)
   add_definitions(-DPLASMA_CUDA)
 endif()
 
+if(NOT APPLE AND NOT MSVC)
+  # Localize thirdparty symbols using a linker version script. This hides them
+  # from the client application. The OS X linker does not support the
+  # version-script option.
+  set(PLASMA_SHARED_LINK_FLAGS
+      "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/symbols.map")
+endif()
+
 add_arrow_lib(plasma
+              CMAKE_PACKAGE_NAME
+              Plasma
+              PKG_CONFIG_NAME
+              plasma
               SOURCES
               ${PLASMA_SRCS}
               OUTPUTS
               PLASMA_LIBRARIES
-              DEPENDENCIES
-              gen_plasma_fbs
+              SHARED_LINK_FLAGS
+              ${PLASMA_SHARED_LINK_FLAGS}
               SHARED_LINK_LIBS
               ${PLASMA_LINK_LIBS}
               STATIC_LINK_LIBS
@@ -109,10 +93,10 @@ endforeach()
 
 # The optimization flag -O3 is suggested by dlmalloc.c, which is #included in
 # malloc.cc; we set it here regardless of whether we do a debug or release build.
-set_source_files_properties(malloc.cc PROPERTIES COMPILE_FLAGS "-O3")
+set_source_files_properties(dlmalloc.cc PROPERTIES COMPILE_FLAGS "-O3")
 
-if("${COMPILER_FAMILY}" STREQUAL "clang")
-  set_property(SOURCE malloc.cc
+if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set_property(SOURCE dlmalloc.cc
                APPEND_STRING
                PROPERTY COMPILE_FLAGS " -Wno-parentheses-equality \
 -Wno-null-pointer-arithmetic \
@@ -120,17 +104,22 @@ if("${COMPILER_FAMILY}" STREQUAL "clang")
 -Wno-unused-macros")
 endif()
 
-if("${COMPILER_FAMILY}" STREQUAL "gcc")
-  set_property(SOURCE malloc.cc APPEND_STRING PROPERTY COMPILE_FLAGS " -Wno-conversion")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  set_property(SOURCE dlmalloc.cc APPEND_STRING PROPERTY COMPILE_FLAGS " -Wno-conversion")
 endif()
 
 list(APPEND PLASMA_EXTERNAL_STORE_SOURCES "external_store.cc" "hash_table_store.cc")
 
-# We use static libraries for the plasma_store_server executable so that it can
+# We use static libraries for the plasma-store-server executable so that it can
 # be copied around and used in different locations.
-add_executable(plasma_store_server ${PLASMA_EXTERNAL_STORE_SOURCES} store.cc)
-target_link_libraries(plasma_store_server plasma_static ${PLASMA_STATIC_LINK_LIBS})
-add_dependencies(plasma plasma_store_server)
+add_executable(plasma-store-server ${PLASMA_EXTERNAL_STORE_SOURCES} ${PLASMA_STORE_SRCS})
+if(ARROW_BUILD_STATIC)
+  target_link_libraries(plasma-store-server plasma_static ${PLASMA_STATIC_LINK_LIBS})
+else()
+  # Fallback to shared libs in the case that static libraries are not build.
+  target_link_libraries(plasma-store-server plasma_shared ${PLASMA_LINK_LIBS})
+endif()
+add_dependencies(plasma plasma-store-server)
 
 if(ARROW_RPATH_ORIGIN)
   if(APPLE)
@@ -138,24 +127,36 @@ if(ARROW_RPATH_ORIGIN)
   else()
     set(_lib_install_rpath "\$ORIGIN")
   endif()
-  set_target_properties(plasma_store_server
+  set_target_properties(plasma-store-server
                         PROPERTIES INSTALL_RPATH ${_lib_install_rpath})
+elseif(APPLE)
+  # With OSX and conda, we need to set the correct RPATH so that dependencies
+  # are found. The installed libraries with conda have an RPATH that matches
+  # for executables and libraries lying in $ENV{CONDA_PREFIX}/bin or
+  # $ENV{CONDA_PREFIX}/lib but our test libraries and executables are not
+  # installed there.
+  if(NOT "$ENV{CONDA_PREFIX}" STREQUAL "" AND APPLE)
+    set_target_properties(plasma-store-server
+                          PROPERTIES BUILD_WITH_INSTALL_RPATH
+                                     TRUE
+                                     INSTALL_RPATH_USE_LINK_PATH
+                                     TRUE
+                                     INSTALL_RPATH
+                                     "$ENV{CONDA_PREFIX}/lib")
+  endif()
 endif()
 
 install(FILES common.h
               compat.h
               client.h
               events.h
-              test-util.h
+              test_util.h
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/plasma")
 
 # Plasma store
-set_target_properties(plasma_store_server PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
-install(TARGETS plasma_store_server ${INSTALL_IS_OPTIONAL}
-        DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-# pkg-config support
-arrow_add_pkg_config("plasma")
+set_target_properties(plasma-store-server PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
+install(TARGETS plasma-store-server ${INSTALL_IS_OPTIONAL} DESTINATION
+                ${CMAKE_INSTALL_BINDIR})
 
 if(ARROW_PLASMA_JAVA_CLIENT)
   # Plasma java client support
@@ -189,17 +190,9 @@ if(ARROW_PLASMA_JAVA_CLIENT)
                           plasma_shared
                           ${PLASMA_LINK_LIBS}
                           "-undefined dynamic_lookup"
-                          -Wl,-force_load,${FLATBUFFERS_STATIC_LIB}
-                          ${FLATBUFFERS_STATIC_LIB}
                           ${PTHREAD_LIBRARY})
   else(APPLE)
-    target_link_libraries(plasma_java
-                          plasma_shared
-                          ${PLASMA_LINK_LIBS}
-                          -Wl,--whole-archive
-                          ${FLATBUFFERS_STATIC_LIB}
-                          -Wl,--no-whole-archive
-                          ${FLATBUFFERS_STATIC_LIB}
+    target_link_libraries(plasma_java plasma_shared ${PLASMA_LINK_LIBS}
                           ${PTHREAD_LIBRARY})
   endif(APPLE)
 endif()
@@ -225,17 +218,20 @@ function(ADD_PLASMA_TEST REL_TEST_NAME)
                 ${ARG_UNPARSED_ARGUMENTS})
 endfunction()
 
-add_plasma_test(test/serialization_tests EXTRA_LINK_LIBS plasma_shared
-                ${PLASMA_LINK_LIBS})
+if(ARROW_BUILD_SHARED)
+  set(PLASMA_TEST_LIBS plasma_shared ${PLASMA_LINK_LIBS})
+else()
+  set(PLASMA_TEST_LIBS plasma_static ${PLASMA_STATIC_LINK_LIBS})
+endif()
+
+add_plasma_test(test/serialization_tests EXTRA_LINK_LIBS ${PLASMA_TEST_LIBS})
 add_plasma_test(test/client_tests
                 EXTRA_LINK_LIBS
-                plasma_shared
-                ${PLASMA_LINK_LIBS}
+                ${PLASMA_TEST_LIBS}
                 EXTRA_DEPENDENCIES
-                plasma_store_server)
+                plasma-store-server)
 add_plasma_test(test/external_store_tests
                 EXTRA_LINK_LIBS
-                plasma_shared
-                ${PLASMA_LINK_LIBS}
+                ${PLASMA_TEST_LIBS}
                 EXTRA_DEPENDENCIES
-                plasma_store_server)
+                plasma-store-server)

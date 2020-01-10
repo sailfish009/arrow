@@ -41,6 +41,7 @@ namespace Apache.Arrow.Ipc
         }
 
         class TypeVisitor : 
+            IArrowTypeVisitor<BooleanType>,
             IArrowTypeVisitor<Int8Type>,
             IArrowTypeVisitor<Int16Type>,
             IArrowTypeVisitor<Int32Type>,
@@ -97,7 +98,10 @@ namespace Apache.Arrow.Ipc
 
             public void Visit(ListType type)
             {
-                throw new NotImplementedException();
+                Flatbuf.List.StartList(Builder);
+                Result = FieldType.Build(
+                    Flatbuf.Type.List, 
+                    Flatbuf.List.EndList(Builder));
             }
 
             public void Visit(UnionType type)
@@ -117,7 +121,7 @@ namespace Apache.Arrow.Ipc
             {  
                 StringOffset timezoneStringOffset = default;
 
-                if (string.IsNullOrWhiteSpace(type.Timezone))
+                if (!string.IsNullOrWhiteSpace(type.Timezone))
                     timezoneStringOffset = Builder.CreateString(type.Timezone);
 
                 Result = FieldType.Build(

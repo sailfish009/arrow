@@ -17,25 +17,20 @@
 
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
 #include <memory>
-#include <unordered_map>
 #include <utility>
+#include <vector>
 
-#include "arrow/buffer.h"
-#include "arrow/memory_pool.h"
-#include "arrow/util/bit-util.h"
-#include "arrow/util/macros.h"
-
-#include "parquet/encoding.h"
 #include "parquet/exception.h"
+#include "parquet/platform.h"
 #include "parquet/schema.h"
 #include "parquet/types.h"
-#include "parquet/util/memory.h"
-#include "parquet/util/visibility.h"
 
 namespace arrow {
+
+class Array;
+class ChunkedArray;
 
 namespace BitUtil {
 class BitReader;
@@ -49,7 +44,7 @@ class RleDecoder;
 
 namespace parquet {
 
-class DictionaryPage;
+class Decryptor;
 class Page;
 
 // 16 MB is the default maximum page header size
@@ -57,8 +52,6 @@ static constexpr uint32_t kDefaultMaxPageHeaderSize = 16 * 1024 * 1024;
 
 // 16 KB is the default expected page header size
 static constexpr uint32_t kDefaultPageHeaderSize = 16 * 1024;
-
-namespace BitUtil = ::arrow::BitUtil;
 
 class PARQUET_EXPORT LevelDecoder {
  public:
@@ -81,6 +74,23 @@ class PARQUET_EXPORT LevelDecoder {
   std::unique_ptr<::arrow::BitUtil::BitReader> bit_packed_decoder_;
 };
 
+struct CryptoContext {
+  CryptoContext(bool start_with_dictionary_page, int16_t rg_ordinal, int16_t col_ordinal,
+                std::shared_ptr<Decryptor> meta, std::shared_ptr<Decryptor> data)
+      : start_decrypt_with_dictionary_page(start_with_dictionary_page),
+        row_group_ordinal(rg_ordinal),
+        column_ordinal(col_ordinal),
+        meta_decryptor(std::move(meta)),
+        data_decryptor(std::move(data)) {}
+  CryptoContext() {}
+
+  bool start_decrypt_with_dictionary_page = false;
+  int16_t row_group_ordinal = -1;
+  int16_t column_ordinal = -1;
+  std::shared_ptr<Decryptor> meta_decryptor;
+  std::shared_ptr<Decryptor> data_decryptor;
+};
+
 // Abstract page iterator interface. This way, we can feed column pages to the
 // ColumnReader through whatever mechanism we choose
 class PARQUET_EXPORT PageReader {
@@ -88,9 +98,9 @@ class PARQUET_EXPORT PageReader {
   virtual ~PageReader() = default;
 
   static std::unique_ptr<PageReader> Open(
-      std::unique_ptr<InputStream> stream, int64_t total_num_rows,
-      Compression::type codec,
-      ::arrow::MemoryPool* pool = ::arrow::default_memory_pool());
+      std::shared_ptr<ArrowInputStream> stream, int64_t total_num_rows,
+      Compression::type codec, ::arrow::MemoryPool* pool = ::arrow::default_memory_pool(),
+      const CryptoContext* ctx = NULLPTR);
 
   // @returns: shared_ptr<Page>(nullptr) on EOS, std::shared_ptr<Page>
   // containing new Page otherwise
@@ -145,7 +155,7 @@ class TypedColumnReader : public ColumnReader {
   /// column and leave spaces for null entries on the lowest level in the values
   /// buffer.
   ///
-  /// In comparision to ReadBatch the length of repetition and definition levels
+  /// In comparison to ReadBatch the length of repetition and definition levels
   /// is the same as of the number of values read for max_definition_level == 1.
   /// In the case of max_definition_level > 1, the repetition and definition
   /// levels are larger than the values but the values include the null entries
@@ -187,6 +197,120 @@ class TypedColumnReader : public ColumnReader {
 
 namespace internal {
 
+/// \brief Stateful column reader that delimits semantic records for both flat
+/// and nested columns
+///
+/// \note API EXPERIMENTAL
+/// \since 1.3.0
+class RecordReader {
+ public:
+  static std::shared_ptr<RecordReader> Make(
+      const ColumnDescriptor* descr,
+      ::arrow::MemoryPool* pool = ::arrow::default_memory_pool(),
+      const bool read_dictionary = false);
+
+  virtual ~RecordReader() = default;
+
+  /// \brief Attempt to read indicated number of records from column chunk
+  /// \return number of records read
+  virtual int64_t ReadRecords(int64_t num_records) = 0;
+
+  /// \brief Pre-allocate space for data. Results in better flat read performance
+  virtual void Reserve(int64_t num_values) = 0;
+
+  /// \brief Clear consumed values and repetition/definition levels as the
+  /// result of calling ReadRecords
+  virtual void Reset() = 0;
+
+  /// \brief Transfer filled values buffer to caller. A new one will be
+  /// allocated in subsequent ReadRecords calls
+  virtual std::shared_ptr<ResizableBuffer> ReleaseValues() = 0;
+
+  /// \brief Transfer filled validity bitmap buffer to caller. A new one will
+  /// be allocated in subsequent ReadRecords calls
+  virtual std::shared_ptr<ResizableBuffer> ReleaseIsValid() = 0;
+
+  /// \brief Return true if the record reader has more internal data yet to
+  /// process
+  virtual bool HasMoreData() const = 0;
+
+  /// \brief Advance record reader to the next row group
+  /// \param[in] reader obtained from RowGroupReader::GetColumnPageReader
+  virtual void SetPageReader(std::unique_ptr<PageReader> reader) = 0;
+
+  virtual void DebugPrintState() = 0;
+
+  /// \brief Decoded definition levels
+  int16_t* def_levels() const {
+    return reinterpret_cast<int16_t*>(def_levels_->mutable_data());
+  }
+
+  /// \brief Decoded repetition levels
+  int16_t* rep_levels() const {
+    return reinterpret_cast<int16_t*>(rep_levels_->mutable_data());
+  }
+
+  /// \brief Decoded values, including nulls, if any
+  uint8_t* values() const { return values_->mutable_data(); }
+
+  /// \brief Number of values written including nulls (if any)
+  int64_t values_written() const { return values_written_; }
+
+  /// \brief Number of definition / repetition levels (from those that have
+  /// been decoded) that have been consumed inside the reader.
+  int64_t levels_position() const { return levels_position_; }
+
+  /// \brief Number of definition / repetition levels that have been written
+  /// internally in the reader
+  int64_t levels_written() const { return levels_written_; }
+
+  /// \brief Number of nulls in the leaf
+  int64_t null_count() const { return null_count_; }
+
+  /// \brief True if the leaf values are nullable
+  bool nullable_values() const { return nullable_values_; }
+
+  /// \brief True if reading directly as Arrow dictionary-encoded
+  bool read_dictionary() const { return read_dictionary_; }
+
+ protected:
+  bool nullable_values_;
+
+  bool at_record_start_;
+  int64_t records_read_;
+
+  int64_t values_written_;
+  int64_t values_capacity_;
+  int64_t null_count_;
+
+  int64_t levels_written_;
+  int64_t levels_position_;
+  int64_t levels_capacity_;
+
+  std::shared_ptr<::arrow::ResizableBuffer> values_;
+  // In the case of false, don't allocate the values buffer (when we directly read into
+  // builder classes).
+  bool uses_values_;
+
+  std::shared_ptr<::arrow::ResizableBuffer> valid_bits_;
+  std::shared_ptr<::arrow::ResizableBuffer> def_levels_;
+  std::shared_ptr<::arrow::ResizableBuffer> rep_levels_;
+
+  bool read_dictionary_ = false;
+};
+
+class BinaryRecordReader : virtual public RecordReader {
+ public:
+  virtual std::vector<std::shared_ptr<::arrow::Array>> GetBuilderChunks() = 0;
+};
+
+/// \brief Read records directly to dictionary-encoded Arrow form (int32
+/// indices). Only valid for BYTE_ARRAY columns
+class DictionaryRecordReader : virtual public RecordReader {
+ public:
+  virtual std::shared_ptr<::arrow::ChunkedArray> GetResult() = 0;
+};
+
 static inline void DefinitionLevelsToBitmap(
     const int16_t* def_levels, int64_t num_def_levels, const int16_t max_definition_level,
     const int16_t max_repetition_level, int64_t* values_read, int64_t* null_count,
@@ -194,7 +318,7 @@ static inline void DefinitionLevelsToBitmap(
   // We assume here that valid_bits is large enough to accommodate the
   // additional definition levels and the ones that have already been written
   ::arrow::internal::BitmapWriter valid_bits_writer(valid_bits, valid_bits_offset,
-                                                    valid_bits_offset + num_def_levels);
+                                                    num_def_levels);
 
   // TODO(itaiin): As an interim solution we are splitting the code path here
   // between repeated+flat column reads, and non-repeated+nested reads.

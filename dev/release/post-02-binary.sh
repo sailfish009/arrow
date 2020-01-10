@@ -36,18 +36,16 @@ if [ -z "${BINTRAY_PASSWORD}" ]; then
   exit 1
 fi
 
+if ! jq --help > /dev/null 2>&1; then
+  echo "jq is required"
+  exit 1
+fi
+
 : ${BINTRAY_REPOSITORY:=apache/arrow}
 
-docker_image_name=apache-arrow/release-binary
+BINTRAY_DOWNLOAD_URL_BASE=https://dl.bintray.com
 
-jq() {
-  docker \
-    run \
-    --rm \
-    --interactive \
-    ${docker_image_name} \
-    jq "$@"
-}
+docker_image_name=apache-arrow/release-binary
 
 bintray() {
   local command=$1
@@ -97,13 +95,14 @@ download_files() {
       GET /packages/${BINTRAY_REPOSITORY}/${target}-rc/versions/${version_name}/files | \
       jq -r ".[].path")
 
+  local file
   for file in ${files}; do
     mkdir -p "$(dirname ${file})"
     curl \
       --fail \
       --location \
       --output ${file} \
-      https://dl.bintray.com/${BINTRAY_REPOSITORY}/${file}
+      ${BINTRAY_DOWNLOAD_URL_BASE}/${BINTRAY_REPOSITORY}/${file}
   done
 }
 
@@ -122,6 +121,15 @@ upload_file() {
   local path=$3
 
   local sha256=$(shasum -a 256 ${path} | awk '{print $1}')
+  local download_path=/${BINTRAY_REPOSITORY}/${target}/${path}
+  if curl \
+       --fail \
+       --head \
+       ${BINTRAY_DOWNLOAD_URL_BASE}${download_path} | \
+         grep -q "^X-Checksum-Sha2: ${sha256}"; then
+    return 0
+  fi
+
   local request_path=/content/${BINTRAY_REPOSITORY}/${target}/${version}/${target}/${path}
   if ! bintray \
          PUT ${request_path} \

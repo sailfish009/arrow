@@ -27,6 +27,7 @@
 #include "arrow/scalar.h"
 #include "arrow/table.h"
 #include "arrow/util/macros.h"
+#include "arrow/util/memory.h"
 #include "arrow/util/variant.h"  // IWYU pragma: export
 #include "arrow/util/visibility.h"
 
@@ -59,6 +60,14 @@ class ARROW_EXPORT OpKernel {
   virtual std::shared_ptr<DataType> out_type() const = 0;
 };
 
+struct Datum;
+static inline bool CollectionEquals(const std::vector<Datum>& left,
+                                    const std::vector<Datum>& right);
+
+// Datums variants may have a length. This special value indicate that the
+// current variant does not have a length.
+constexpr int64_t kUnknownLength = -1;
+
 /// \class Datum
 /// \brief Variant type for various Arrow C++ data structures
 struct ARROW_EXPORT Datum {
@@ -90,8 +99,7 @@ struct ARROW_EXPORT Datum {
       : value(value) {}
 
   // Cast from subtypes of Array to Datum
-  template <typename T,
-            typename = typename std::enable_if<std::is_base_of<Array, T>::value>::type>
+  template <typename T, typename = enable_if_t<std::is_base_of<Array, T>::value>>
   Datum(const std::shared_ptr<T>& value)  // NOLINT implicit conversion
       : Datum(std::shared_ptr<Array>(value)) {}
 
@@ -112,6 +120,11 @@ struct ARROW_EXPORT Datum {
 
   Datum(const Datum& other) noexcept { this->value = other.value; }
 
+  Datum& operator=(const Datum& other) noexcept {
+    value = other.value;
+    return *this;
+  }
+
   // Define move constructor and move assignment, for better performance
   Datum(Datum&& other) noexcept : value(std::move(other.value)) {}
 
@@ -121,7 +134,7 @@ struct ARROW_EXPORT Datum {
   }
 
   Datum::type kind() const {
-    switch (this->value.which()) {
+    switch (this->value.index()) {
       case 0:
         return Datum::NONE;
       case 1:
@@ -153,6 +166,14 @@ struct ARROW_EXPORT Datum {
     return util::get<std::shared_ptr<ChunkedArray>>(this->value);
   }
 
+  std::shared_ptr<RecordBatch> record_batch() const {
+    return util::get<std::shared_ptr<RecordBatch>>(this->value);
+  }
+
+  std::shared_ptr<Table> table() const {
+    return util::get<std::shared_ptr<Table>>(this->value);
+  }
+
   const std::vector<Datum> collection() const {
     return util::get<std::vector<Datum>>(this->value);
   }
@@ -169,6 +190,8 @@ struct ARROW_EXPORT Datum {
 
   bool is_scalar() const { return this->kind() == Datum::SCALAR; }
 
+  bool is_collection() const { return this->kind() == Datum::COLLECTION; }
+
   /// \brief The value type of the variant, if any
   ///
   /// \return nullptr if no type
@@ -181,6 +204,43 @@ struct ARROW_EXPORT Datum {
       return util::get<std::shared_ptr<Scalar>>(this->value)->type;
     }
     return NULLPTR;
+  }
+
+  /// \brief The value length of the variant, if any
+  ///
+  /// \return kUnknownLength if no type
+  int64_t length() const {
+    if (this->kind() == Datum::ARRAY) {
+      return util::get<std::shared_ptr<ArrayData>>(this->value)->length;
+    } else if (this->kind() == Datum::CHUNKED_ARRAY) {
+      return util::get<std::shared_ptr<ChunkedArray>>(this->value)->length();
+    } else if (this->kind() == Datum::SCALAR) {
+      return 1;
+    }
+    return kUnknownLength;
+  }
+
+  bool Equals(const Datum& other) const {
+    if (this->kind() != other.kind()) return false;
+
+    switch (this->kind()) {
+      case Datum::NONE:
+        return true;
+      case Datum::SCALAR:
+        return internal::SharedPtrEquals(this->scalar(), other.scalar());
+      case Datum::ARRAY:
+        return internal::SharedPtrEquals(this->make_array(), other.make_array());
+      case Datum::CHUNKED_ARRAY:
+        return internal::SharedPtrEquals(this->chunked_array(), other.chunked_array());
+      case Datum::RECORD_BATCH:
+        return internal::SharedPtrEquals(this->record_batch(), other.record_batch());
+      case Datum::TABLE:
+        return internal::SharedPtrEquals(this->table(), other.table());
+      case Datum::COLLECTION:
+        return CollectionEquals(this->collection(), other.collection());
+      default:
+        return false;
+    }
   }
 };
 
@@ -201,7 +261,7 @@ class ARROW_EXPORT UnaryKernel : public OpKernel {
   /// \param[out] out The output of the function. Each implementation of this
   /// function might assume different things about the existing contents of out
   /// (e.g. which buffers are preallocated).  In the future it is expected that
-  /// there will be a more generic mechansim for understanding the necessary
+  /// there will be a more generic mechanism for understanding the necessary
   /// contracts.
   virtual Status Call(FunctionContext* ctx, const Datum& input, Datum* out) = 0;
 };
@@ -213,6 +273,16 @@ class ARROW_EXPORT BinaryKernel : public OpKernel {
   virtual Status Call(FunctionContext* ctx, const Datum& left, const Datum& right,
                       Datum* out) = 0;
 };
+
+static inline bool CollectionEquals(const std::vector<Datum>& left,
+                                    const std::vector<Datum>& right) {
+  if (left.size() != right.size()) return false;
+
+  for (size_t i = 0; i < left.size(); i++)
+    if (!left[i].Equals(right[i])) return false;
+
+  return true;
+}
 
 }  // namespace compute
 }  // namespace arrow

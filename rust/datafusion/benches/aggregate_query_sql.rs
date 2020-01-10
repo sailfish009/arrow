@@ -20,6 +20,7 @@ extern crate criterion;
 use criterion::Criterion;
 
 use std::cell::RefCell;
+use std::env;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -34,12 +35,10 @@ use datafusion::execution::context::ExecutionContext;
 fn aggregate_query(ctx: &Rc<RefCell<ExecutionContext>>, sql: &str) {
     // execute the query
     let mut mut_ctx = ctx.borrow_mut();
-    let relation = mut_ctx.sql(&sql, 1024 * 1024).unwrap();
+    let results = mut_ctx.sql(&sql, 1024 * 1024).unwrap();
 
     // display the relation
-    let mut results = relation.borrow_mut();
-
-    while let Some(_) = results.next().unwrap() {}
+    for _batch in results {}
 }
 
 fn create_context() -> Rc<RefCell<ExecutionContext>> {
@@ -60,9 +59,11 @@ fn create_context() -> Rc<RefCell<ExecutionContext>> {
         Field::new("c13", DataType::Utf8, false),
     ]));
 
+    let testdata = env::var("ARROW_TEST_DATA").expect("ARROW_TEST_DATA not defined");
+
     // create CSV data source
     let csv = CsvFile::new(
-        "../../testing/data/csv/aggregate_test_100.csv",
+        &format!("{}/csv/aggregate_test_100.csv", testdata),
         &schema,
         true,
     );

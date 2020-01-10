@@ -17,20 +17,21 @@
 
 //! CSV Data source
 
-use std::cell::RefCell;
 use std::fs::File;
-use std::rc::Rc;
-use std::string::String;
-use std::sync::Arc;
 
 use arrow::csv;
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
+use std::string::String;
+use std::sync::Arc;
 
-use crate::datasource::{RecordBatchIterator, ScanResult, Table};
-use crate::execution::error::Result;
+use crate::datasource::{ScanResult, TableProvider};
+use crate::error::Result;
+use crate::execution::physical_plan::csv::CsvExec;
+use crate::execution::physical_plan::{BatchIterator, ExecutionPlan};
 
 /// Represents a CSV file with a provided schema
+// TODO: usage example (rather than documenting `new()`)
 pub struct CsvFile {
     filename: String,
     schema: Arc<Schema>,
@@ -38,6 +39,7 @@ pub struct CsvFile {
 }
 
 impl CsvFile {
+    #[allow(missing_docs)]
     pub fn new(filename: &str, schema: &Schema, has_header: bool) -> Self {
         Self {
             filename: String::from(filename),
@@ -47,41 +49,49 @@ impl CsvFile {
     }
 }
 
-impl Table for CsvFile {
-    fn schema(&self) -> &Arc<Schema> {
-        &self.schema
+impl TableProvider for CsvFile {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
     }
 
     fn scan(
         &self,
         projection: &Option<Vec<usize>>,
         batch_size: usize,
-    ) -> Result<ScanResult> {
-        Ok(Rc::new(RefCell::new(CsvBatchIterator::new(
+    ) -> Result<Vec<ScanResult>> {
+        let exec = CsvExec::try_new(
             &self.filename,
             self.schema.clone(),
             self.has_header,
-            projection,
+            projection.clone(),
             batch_size,
-        ))))
+        )?;
+        let partitions = exec.partitions()?;
+        let iterators = partitions
+            .iter()
+            .map(|p| p.execute())
+            .collect::<Result<Vec<_>>>()?;
+        Ok(iterators)
     }
 }
 
 /// Iterator over CSV batches
+// TODO: usage example (rather than documenting `new()`)
 pub struct CsvBatchIterator {
     schema: Arc<Schema>,
     reader: csv::Reader<File>,
 }
 
 impl CsvBatchIterator {
-    pub fn new(
+    #[allow(missing_docs)]
+    pub fn try_new(
         filename: &str,
         schema: Arc<Schema>,
         has_header: bool,
         projection: &Option<Vec<usize>>,
         batch_size: usize,
-    ) -> Self {
-        let file = File::open(filename).unwrap();
+    ) -> Result<Self> {
+        let file = File::open(filename)?;
         let reader = csv::Reader::new(
             file,
             schema.clone(),
@@ -100,16 +110,16 @@ impl CsvBatchIterator {
             None => schema,
         };
 
-        Self {
+        Ok(Self {
             schema: projected_schema,
             reader,
-        }
+        })
     }
 }
 
-impl RecordBatchIterator for CsvBatchIterator {
-    fn schema(&self) -> &Arc<Schema> {
-        &self.schema
+impl BatchIterator for CsvBatchIterator {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
     }
 
     fn next(&mut self) -> Result<Option<RecordBatch>> {

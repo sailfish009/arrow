@@ -26,44 +26,41 @@ arrow_install_all_headers("arrow/util")
 # arrow_test_main
 #
 
-if(ARROW_BUILD_BENCHMARKS)
-  add_library(arrow_benchmark_main benchmark_main.cc)
-  if(APPLE)
-    target_link_libraries(arrow_benchmark_main gbenchmark_static)
-  elseif(MSVC)
-    target_link_libraries(arrow_benchmark_main gbenchmark_static Shlwapi.lib)
-  else()
-    target_link_libraries(arrow_benchmark_main gbenchmark_static Threads::Threads)
-  endif()
+add_arrow_test(utility-test
+               SOURCES
+               align_util_test.cc
+               checked_cast_test.cc
+               formatting_util_test.cc
+               key_value_metadata_test.cc
+               hashing_test.cc
+               int_util_test.cc
+               io_util_test.cc
+               iterator_test.cc
+               parsing_util_test.cc
+               range_test.cc
+               stl_util_test.cc
+               string_test.cc
+               time_test.cc
+               trie_test.cc
+               utf8_util_test.cc)
 
-  add_dependencies(arrow_benchmark_main arrow_benchmark_dependencies)
-endif()
+add_arrow_test(bit_util_test)
+add_arrow_test(compression_test)
+add_arrow_test(decimal_test)
+add_arrow_test(logging_test)
+add_arrow_test(rle_encoding_test)
+add_arrow_test(task_group_test)
+add_arrow_test(thread_pool_test)
+add_arrow_test(uri_test)
 
-add_arrow_test(bit-util-test)
-add_arrow_test(checked-cast-test)
-add_arrow_test(compression-test)
-add_arrow_test(decimal-test)
-add_arrow_test(hashing-test)
-add_arrow_test(int-util-test)
-add_arrow_test(key-value-metadata-test)
-add_arrow_test(lazy-test)
-add_arrow_test(logging-test)
-add_arrow_test(parsing-util-test)
-add_arrow_test(rle-encoding-test)
-add_arrow_test(stl-util-test)
-add_arrow_test(task-group-test)
-add_arrow_test(thread-pool-test)
-add_arrow_test(trie-test)
-add_arrow_test(utf8-util-test)
-
-add_arrow_benchmark(bit-util-benchmark)
-add_arrow_benchmark(compression-benchmark)
-add_arrow_benchmark(decimal-benchmark)
-add_arrow_benchmark(hashing-benchmark)
-add_arrow_benchmark(int-util-benchmark)
-add_arrow_benchmark(lazy-benchmark)
-add_arrow_benchmark(machine-benchmark)
-add_arrow_benchmark(number-parsing-benchmark)
-add_arrow_benchmark(thread-pool-benchmark)
-add_arrow_benchmark(trie-benchmark)
-add_arrow_benchmark(utf8-util-benchmark)
+add_arrow_benchmark(bit_util_benchmark)
+add_arrow_benchmark(compression_benchmark)
+add_arrow_benchmark(decimal_benchmark)
+add_arrow_benchmark(hashing_benchmark)
+add_arrow_benchmark(int_util_benchmark)
+add_arrow_benchmark(machine_benchmark)
+add_arrow_benchmark(number_parsing_benchmark)
+add_arrow_benchmark(range_benchmark)
+add_arrow_benchmark(thread_pool_benchmark)
+add_arrow_benchmark(trie_benchmark)
+add_arrow_benchmark(utf8_util_benchmark)

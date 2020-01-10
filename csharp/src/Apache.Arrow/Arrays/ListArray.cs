@@ -24,22 +24,27 @@ namespace Apache.Arrow
 
         public ArrowBuffer ValueOffsetsBuffer => Data.Buffers[1];
 
-        public ReadOnlySpan<int> ValueOffsets => ValueOffsetsBuffer.Span.CastTo<int>().Slice(0, Length + 1);
+        public ReadOnlySpan<int> ValueOffsets => ValueOffsetsBuffer.Span.CastTo<int>().Slice(Offset, Length + 1);
 
         public ListArray(IArrowType dataType, int length,
             ArrowBuffer valueOffsetsBuffer, IArrowArray values,
             ArrowBuffer nullBitmapBuffer, int nullCount = 0, int offset = 0)
             : this(new ArrayData(dataType, length, nullCount, offset,
-                new[] {nullBitmapBuffer, valueOffsetsBuffer}, new[] {values.Data}))
+                new[] { nullBitmapBuffer, valueOffsetsBuffer }, new[] { values.Data }),
+                values)
         {
-            Values = values;
         }
 
         public ListArray(ArrayData data)
-            : base(data)
+            : this(data, ArrowArrayFactory.BuildArray(data.Children[0]))
+        {
+        }
+
+        private ListArray(ArrayData data, IArrowArray values) : base(data)
         {
             data.EnsureBufferCount(2);
             data.EnsureDataType(ArrowTypeId.List);
+            Values = values;
         }
 
         public override void Accept(IArrowArrayVisitor visitor) => Accept(this, visitor);
@@ -53,6 +58,15 @@ namespace Apache.Arrow
         {
             var offsets = ValueOffsets;
             return offsets[index + 1] - offsets[index];
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Values?.Dispose();
+            }
+            base.Dispose(disposing);
         }
     }
 }

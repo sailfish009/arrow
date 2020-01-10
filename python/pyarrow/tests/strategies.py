@@ -38,6 +38,8 @@ bool_type = st.just(pa.bool_())
 
 binary_type = st.just(pa.binary())
 string_type = st.just(pa.string())
+large_binary_type = st.just(pa.large_binary())
+large_string_type = st.just(pa.large_string())
 
 signed_integer_types = st.sampled_from([
     pa.int8(),
@@ -60,8 +62,8 @@ floating_types = st.sampled_from([
 ])
 decimal_type = st.builds(
     pa.decimal128,
-    precision=st.integers(min_value=0, max_value=38),
-    scale=st.integers(min_value=0, max_value=38)
+    precision=st.integers(min_value=1, max_value=38),
+    scale=st.integers(min_value=1, max_value=38)
 )
 numeric_types = st.one_of(integer_types, floating_types, decimal_type)
 
@@ -80,13 +82,18 @@ timestamp_types = st.builds(
     unit=st.sampled_from(['s', 'ms', 'us', 'ns']),
     tz=tzst.timezones()
 )
-temporal_types = st.one_of(date_types, time_types, timestamp_types)
+duration_types = st.sampled_from([
+    pa.duration(unit) for unit in ['s', 'ms', 'us', 'ns']])
+temporal_types = st.one_of(
+    date_types, time_types, timestamp_types, duration_types)
 
 primitive_types = st.one_of(
     null_type,
     bool_type,
     binary_type,
     string_type,
+    large_binary_type,
+    large_string_type,
     numeric_types,
     temporal_types
 )
@@ -100,7 +107,10 @@ def fields(type_strategy=primitive_types):
 
 
 def list_types(item_strategy=primitive_types):
-    return st.builds(pa.list_, item_strategy)
+    return (
+        st.builds(pa.list_, item_strategy) |
+        st.builds(pa.large_list, item_strategy)
+        )
 
 
 def struct_types(item_strategy=primitive_types):
@@ -155,26 +165,32 @@ def arrays(draw, type, size=None):
 
     shape = (size,)
 
-    if pa.types.is_list(type):
+    if pa.types.is_list(type) or pa.types.is_large_list(type):
         offsets = draw(npst.arrays(np.uint8(), shape=shape)).cumsum() // 20
         offsets = np.insert(offsets, 0, 0, axis=0)  # prepend with zero
         values = draw(arrays(type.value_type, size=int(offsets.sum())))
-        return pa.ListArray.from_arrays(offsets, values)
+        array_type = (
+            pa.LargeListArray if pa.types.is_large_list(type)
+            else pa.ListArray)
+        return array_type.from_arrays(offsets, values)
 
     if pa.types.is_struct(type):
         h.assume(len(type) > 0)
-        names, child_arrays = [], []
+        fields, child_arrays = [], []
         for field in type:
-            names.append(field.name)
+            fields.append(field)
             child_arrays.append(draw(arrays(field.type, size=size)))
-        # fields' metadata are lost here, because from_arrays doesn't accept
-        # a fields argumentum, only names
-        return pa.StructArray.from_arrays(child_arrays, names=names)
+        return pa.StructArray.from_arrays(child_arrays, fields=fields)
 
     if (pa.types.is_boolean(type) or pa.types.is_integer(type) or
             pa.types.is_floating(type)):
         values = npst.arrays(type.to_pandas_dtype(), shape=(size,))
-        return pa.array(draw(values), type=type)
+        np_arr = draw(values)
+        if pa.types.is_floating(type):
+            # Workaround ARROW-4952: no easy way to assert array equality
+            # in a NaN-tolerant way.
+            np_arr[np.isnan(np_arr)] = -42.0
+        return pa.array(np_arr, type=type)
 
     if pa.types.is_null(type):
         value = st.none()
@@ -185,9 +201,11 @@ def arrays(draw, type, size=None):
     elif pa.types.is_timestamp(type):
         tz = pytz.timezone(type.tz) if type.tz is not None else None
         value = st.datetimes(timezones=st.just(tz))
-    elif pa.types.is_binary(type):
+    elif pa.types.is_duration(type):
+        value = st.timedeltas()
+    elif pa.types.is_binary(type) or pa.types.is_large_binary(type):
         value = st.binary()
-    elif pa.types.is_string(type):
+    elif pa.types.is_string(type) or pa.types.is_large_string(type):
         value = st.text()
     elif pa.types.is_decimal(type):
         # TODO(kszucs): properly limit the precision
@@ -214,13 +232,6 @@ def chunked_arrays(draw, type, min_chunks=0, max_chunks=None, chunk_size=None):
     return pa.chunked_array(draw(chunks), type=type)
 
 
-def columns(type, min_chunks=0, max_chunks=None, chunk_size=None):
-    chunked_array = chunked_arrays(type, chunk_size=chunk_size,
-                                   min_chunks=min_chunks,
-                                   max_chunks=max_chunks)
-    return st.builds(pa.column, st.text(), chunked_array)
-
-
 @st.composite
 def record_batches(draw, type, rows=None, max_fields=None):
     if isinstance(rows, st.SearchStrategy):
@@ -232,7 +243,7 @@ def record_batches(draw, type, rows=None, max_fields=None):
 
     schema = draw(schemas(type, max_fields=max_fields))
     children = [draw(arrays(field.type, size=rows)) for field in schema]
-    # TODO(kszucs): the names and schame arguments are not consistent with
+    # TODO(kszucs): the names and schema arguments are not consistent with
     #               Table.from_array's arguments
     return pa.RecordBatch.from_arrays(children, names=schema)
 
@@ -253,6 +264,5 @@ def tables(draw, type, rows=None, max_fields=None):
 
 all_arrays = arrays(all_types)
 all_chunked_arrays = chunked_arrays(all_types)
-all_columns = columns(all_types)
 all_record_batches = record_batches(all_types)
 all_tables = tables(all_types)

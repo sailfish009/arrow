@@ -20,26 +20,22 @@
 #ifndef ARROW_GPU_CUDA_COMMON_H
 #define ARROW_GPU_CUDA_COMMON_H
 
-#include <sstream>
-
 #include <cuda.h>
 
 namespace arrow {
 namespace cuda {
 
-#define CUDA_DCHECK(STMT) \
-  do {                    \
-    int ret = (STMT);     \
-    DCHECK_EQ(0, ret);    \
-    (void)ret;            \
-  } while (0)
-
 #define CU_RETURN_NOT_OK(STMT)                                                  \
   do {                                                                          \
     CUresult ret = (STMT);                                                      \
     if (ret != CUDA_SUCCESS) {                                                  \
+      const char* name;                                                         \
+      const char* description;                                                  \
+      cuGetErrorName(ret, &name);                                               \
+      cuGetErrorString(ret, &description);                                      \
       return Status::IOError("Cuda Driver API call in ", __FILE__, " at line ", \
-                             __LINE__, " failed with code ", ret, ": ", #STMT); \
+                             __LINE__, " failed with ", name, "[", ret, "] (",  \
+                             description, "): ", #STMT);                        \
     }                                                                           \
   } while (0)
 

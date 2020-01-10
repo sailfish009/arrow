@@ -51,7 +51,6 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::array::*;
-use crate::builder::*;
 use crate::datatypes::*;
 use crate::error::{ArrowError, Result};
 use crate::record_batch::RecordBatch;
@@ -286,7 +285,7 @@ fn infer_json_schema(file: File, max_read_records: Option<usize>) -> Result<Arc<
                                 Ok(())
                             }
                             Value::Object(_) => Err(ArrowError::JsonError(
-                                "Reading nested JSON structes currently not supported"
+                                "Reading nested JSON structs currently not supported"
                                     .to_string(),
                             )),
                         }
@@ -345,6 +344,29 @@ impl<R: Read> Reader<R> {
         }
     }
 
+    /// Returns the schema of the reader, useful for getting the schema without reading
+    /// record batches
+    pub fn schema(&self) -> Arc<Schema> {
+        match &self.projection {
+            Some(projection) => {
+                let fields = self.schema.fields();
+                let projected_fields: Vec<Field> = fields
+                    .iter()
+                    .filter_map(|field| {
+                        if projection.contains(field.name()) {
+                            Some(field.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                Arc::new(Schema::new(projected_fields))
+            }
+            None => self.schema.clone(),
+        }
+    }
+
     /// Read the next batch of records
     pub fn next(&mut self) -> Result<Option<RecordBatch>> {
         let mut rows: Vec<Value> = Vec::with_capacity(self.batch_size);
@@ -396,12 +418,12 @@ impl<R: Read> Reader<R> {
                     }
                     DataType::UInt8 => self.build_primitive_array::<UInt8Type>(rows, field.name()),
                     DataType::Utf8 => {
-                        let mut builder = BinaryBuilder::new(rows.len());
+                        let mut builder = StringBuilder::new(rows.len());
                         for row_index in 0..rows.len() {
                             match rows[row_index].get(field.name()) {
                                 Some(value) => {
                                     match value.as_str() {
-                                        Some(v) => builder.append_string(v)?,
+                                        Some(v) => builder.append_value(v)?,
                                         // TODO: value might exist as something else, coerce so we don't lose it
                                         None => builder.append(false)?,
                                     }
@@ -424,7 +446,7 @@ impl<R: Read> Reader<R> {
                         DataType::Float64 => self.build_list_array::<Float64Type>(rows, field.name()),
                         DataType::Boolean => self.build_boolean_list_array(rows, field.name()),
                         DataType::Utf8 => {
-                            let values_builder = BinaryBuilder::new(rows.len() * 5);
+                            let values_builder = StringBuilder::new(rows.len() * 5);
                             let mut builder = ListBuilder::new(values_builder);
                             for row_index in 0..rows.len() {
                                 match rows[row_index].get(field.name()) {
@@ -455,7 +477,7 @@ impl<R: Read> Reader<R> {
                                         };
                                         for i in 0..vals.len() {
                                             match &vals[i] {
-                                                Some(v) => builder.values().append_string(&v)?,
+                                                Some(v) => builder.values().append_value(&v)?,
                                                 None => builder.values().append_null()?,
                                             };
                                         }
@@ -742,7 +764,9 @@ mod tests {
         assert_eq!(4, batch.num_columns());
         assert_eq!(12, batch.num_rows());
 
-        let schema = batch.schema();
+        let schema = reader.schema();
+        let batch_schema = batch.schema();
+        assert_eq!(&schema, batch_schema);
 
         let a = schema.column_with_name("a").unwrap();
         assert_eq!(0, a.0);
@@ -781,10 +805,10 @@ mod tests {
         let dd = batch
             .column(d.0)
             .as_any()
-            .downcast_ref::<BinaryArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!("4", String::from_utf8(dd.value(0).to_vec()).unwrap());
-        assert_eq!("text", String::from_utf8(dd.value(8).to_vec()).unwrap());
+        assert_eq!("4", dd.value(0));
+        assert_eq!("text", dd.value(8));
     }
 
     #[test]
@@ -798,7 +822,9 @@ mod tests {
         assert_eq!(4, batch.num_columns());
         assert_eq!(12, batch.num_rows());
 
-        let schema = batch.schema();
+        let schema = reader.schema();
+        let batch_schema = batch.schema();
+        assert_eq!(&schema, batch_schema);
 
         let a = schema.column_with_name("a").unwrap();
         assert_eq!(&DataType::Int64, a.1.data_type());
@@ -836,7 +862,7 @@ mod tests {
         let dd = batch
             .column(d.0)
             .as_any()
-            .downcast_ref::<BinaryArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(false, dd.is_valid(0));
         assert_eq!(true, dd.is_valid(1));
@@ -855,10 +881,12 @@ mod tests {
 
         let mut reader: Reader<File> = Reader::new(
             BufReader::new(File::open("test/data/basic.json").unwrap()),
-            Arc::new(schema),
+            Arc::new(schema.clone()),
             1024,
             None,
         );
+        let reader_schema = reader.schema();
+        assert_eq!(reader_schema, Arc::new(schema));
         let batch = reader.next().unwrap().unwrap();
 
         assert_eq!(4, batch.num_columns());
@@ -909,6 +937,13 @@ mod tests {
             1024,
             Some(vec!["a".to_string(), "c".to_string()]),
         );
+        let reader_schema = reader.schema();
+        let expected_schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("c", DataType::Boolean, false),
+        ]));
+        assert_eq!(reader_schema.clone(), expected_schema);
+
         let batch = reader.next().unwrap().unwrap();
 
         assert_eq!(2, batch.num_columns());
@@ -916,6 +951,7 @@ mod tests {
         assert_eq!(12, batch.num_rows());
 
         let schema = batch.schema();
+        assert_eq!(&reader_schema, schema);
 
         let a = schema.column_with_name("a").unwrap();
         assert_eq!(0, a.0);
@@ -1011,7 +1047,7 @@ mod tests {
             List(Box::new(Int64)),
             coerce_data_type(vec![&Int64, &List(Box::new(Int64))]).unwrap()
         );
-        // boolean an number are incompatible, return utf8
+        // boolean and number are incompatible, return utf8
         assert_eq!(
             List(Box::new(Utf8)),
             coerce_data_type(vec![&Boolean, &List(Box::new(Float64))]).unwrap()
@@ -1075,13 +1111,13 @@ mod tests {
             .downcast_ref::<ListArray>()
             .unwrap();
         let dd = dd.values();
-        let dd = dd.as_any().downcast_ref::<BinaryArray>().unwrap();
+        let dd = dd.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(7, dd.len());
         assert_eq!(false, dd.is_valid(1));
-        assert_eq!("text", &String::from_utf8(dd.value(2).to_vec()).unwrap());
-        assert_eq!("1", &String::from_utf8(dd.value(3).to_vec()).unwrap());
-        assert_eq!("false", &String::from_utf8(dd.value(4).to_vec()).unwrap());
-        assert_eq!("array", &String::from_utf8(dd.value(5).to_vec()).unwrap());
-        assert_eq!("2.4", &String::from_utf8(dd.value(6).to_vec()).unwrap());
+        assert_eq!("text", dd.value(2));
+        assert_eq!("1", dd.value(3));
+        assert_eq!("false", dd.value(4));
+        assert_eq!("array", dd.value(5));
+        assert_eq!("2.4", dd.value(6));
     }
 }

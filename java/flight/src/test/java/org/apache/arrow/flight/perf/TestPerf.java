@@ -17,6 +17,7 @@
 
 package org.apache.arrow.flight.perf;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
@@ -28,7 +29,6 @@ import org.apache.arrow.flight.FlightDescriptor;
 import org.apache.arrow.flight.FlightInfo;
 import org.apache.arrow.flight.FlightStream;
 import org.apache.arrow.flight.FlightTestUtil;
-import org.apache.arrow.flight.Location;
 import org.apache.arrow.flight.Ticket;
 import org.apache.arrow.flight.perf.impl.PerfOuterClass.Perf;
 import org.apache.arrow.memory.BufferAllocator;
@@ -47,7 +47,6 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
-import com.google.flatbuffers.FlatBufferBuilder;
 import com.google.protobuf.ByteString;
 
 @org.junit.Ignore
@@ -63,56 +62,69 @@ public class TestPerf {
         Field.nullable("d", MinorType.BIGINT.getType())
     ));
 
-    FlatBufferBuilder builder = new FlatBufferBuilder();
-    pojoSchema.getSchema(builder);
+    ByteString serializedSchema = ByteString.copyFrom(pojoSchema.toByteArray());
 
     return FlightDescriptor.command(Perf.newBuilder()
         .setRecordsPerStream(recordCount)
         .setRecordsPerBatch(recordsPerBatch)
-        .setSchema(ByteString.copyFrom(pojoSchema.toByteArray()))
+        .setSchema(serializedSchema)
         .setStreamCount(streamCount)
         .build()
         .toByteArray());
   }
 
+  public static void main(String[] args) throws Exception {
+    new TestPerf().throughput();
+  }
+
   @Test
   public void throughput() throws Exception {
-    for (int i = 0; i < 10; i++) {
+    final int numRuns = 10;
+    ListeningExecutorService pool = MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(4));
+    double [] throughPuts = new double[numRuns];
+
+    for (int i = 0; i < numRuns; i++) {
       try (
           final BufferAllocator a = new RootAllocator(Long.MAX_VALUE);
           final PerformanceTestServer server =
-              FlightTestUtil.getStartedServer((port) -> new PerformanceTestServer(a,
-                  new Location(FlightTestUtil.LOCALHOST, port)));
-          final FlightClient client = new FlightClient(a, server.getLocation());
+              FlightTestUtil.getStartedServer((location) -> new PerformanceTestServer(a, location));
+          final FlightClient client = FlightClient.builder(a, server.getLocation()).build();
       ) {
-
-        server.start();
-
         final FlightInfo info = client.getInfo(getPerfFlightDescriptor(50_000_000L, 4095, 2));
-        ListeningExecutorService pool = MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(4));
         List<ListenableFuture<Result>> results = info.getEndpoints()
             .stream()
             .map(t -> new Consumer(client, t.getTicket()))
             .map(t -> pool.submit(t))
             .collect(Collectors.toList());
 
-        Futures.whenAllSucceed(results);
-        Result r = new Result();
-        for (ListenableFuture<Result> f : results) {
-          r.add(f.get());
-        }
+        final Result r = Futures.whenAllSucceed(results).call(() -> {
+          Result res = new Result();
+          for (ListenableFuture<Result> f : results) {
+            res.add(f.get());
+          }
+          return res;
+        }).get();
 
         double seconds = r.nanos * 1.0d / 1000 / 1000 / 1000;
+        throughPuts[i] = (r.bytes * 1.0d / 1024 / 1024) / seconds;
         System.out.println(String.format(
-            "Transferred %d records totaling %s bytes at %f mb/s. %f record/s. %f batch/s.",
+            "Transferred %d records totaling %s bytes at %f MiB/s. %f record/s. %f batch/s.",
             r.rows,
             r.bytes,
-            (r.bytes * 1.0d / 1024 / 1024) / seconds,
+            throughPuts[i],
             (r.rows * 1.0d) / seconds,
             (r.batches * 1.0d) / seconds
         ));
       }
     }
+    pool.shutdown();
+
+    System.out.println("Summary: ");
+    double average = Arrays.stream(throughPuts).sum() / numRuns;
+    double sqrSum = Arrays.stream(throughPuts).map(val -> val - average).map(val -> val * val).sum();
+    double stddev = Math.sqrt(sqrSum / numRuns);
+    System.out.println(String.format("Average throughput: %f MiB/s, standard deviation: %f MiB/s",
+            average, stddev));
   }
 
   private final class Consumer implements Callable<Result> {
@@ -130,28 +142,29 @@ public class TestPerf {
     public Result call() throws Exception {
       final Result r = new Result();
       Stopwatch watch = Stopwatch.createStarted();
-      FlightStream stream = client.getStream(ticket);
-      final VectorSchemaRoot root = stream.getRoot();
-      try {
-        BigIntVector a = (BigIntVector) root.getVector("a");
-        while (stream.next()) {
-          int rows = root.getRowCount();
-          long aSum = r.aSum;
-          for (int i = 0; i < rows; i++) {
-            if (VALIDATE) {
-              aSum += a.get(i);
+      try (final FlightStream stream = client.getStream(ticket)) {
+        final VectorSchemaRoot root = stream.getRoot();
+        try {
+          BigIntVector a = (BigIntVector) root.getVector("a");
+          while (stream.next()) {
+            int rows = root.getRowCount();
+            long aSum = r.aSum;
+            for (int i = 0; i < rows; i++) {
+              if (VALIDATE) {
+                aSum += a.get(i);
+              }
             }
+            r.bytes += rows * 32;
+            r.rows += rows;
+            r.aSum = aSum;
+            r.batches++;
           }
-          r.bytes += rows * 32;
-          r.rows += rows;
-          r.aSum = aSum;
-          r.batches++;
-        }
 
-        r.nanos = watch.elapsed(TimeUnit.NANOSECONDS);
-        return r;
-      } finally {
-        root.clear();
+          r.nanos = watch.elapsed(TimeUnit.NANOSECONDS);
+          return r;
+        } finally {
+          root.clear();
+        }
       }
     }
 

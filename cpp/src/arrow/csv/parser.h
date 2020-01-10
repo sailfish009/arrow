@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef ARROW_CSV_PARSER_H
-#define ARROW_CSV_PARSER_H
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +26,7 @@
 #include "arrow/csv/options.h"
 #include "arrow/status.h"
 #include "arrow/util/macros.h"
+#include "arrow/util/string_view.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
@@ -36,6 +36,13 @@ class MemoryPool;
 namespace csv {
 
 constexpr int32_t kMaxParserNumRows = 100000;
+
+/// Skip at most num_rows from the given input.  The input pointer is updated
+/// and the number of actually skipped rows is returns (may be less than
+/// requested if the input is too short).
+ARROW_EXPORT
+int32_t SkipRows(const uint8_t* data, uint32_t size, int32_t num_rows,
+                 const uint8_t** out_data);
 
 /// \class BlockParser
 /// \brief A reusable block-based parser for CSV data
@@ -60,13 +67,23 @@ class ARROW_EXPORT BlockParser {
   ///
   /// Parse a block of CSV data, ingesting up to max_num_rows rows.
   /// The number of bytes actually parsed is returned in out_size.
-  Status Parse(const char* data, uint32_t size, uint32_t* out_size);
+  Status Parse(util::string_view data, uint32_t* out_size);
+
+  /// \brief Parse sequential blocks of data
+  ///
+  /// Only the last block is allowed to be truncated.
+  Status Parse(const std::vector<util::string_view>& data, uint32_t* out_size);
 
   /// \brief Parse the final block of data
   ///
   /// Like Parse(), but called with the final block in a file.
   /// The last row may lack a trailing line separator.
-  Status ParseFinal(const char* data, uint32_t size, uint32_t* out_size);
+  Status ParseFinal(util::string_view data, uint32_t* out_size);
+
+  /// \brief Parse the final sequential blocks of data
+  ///
+  /// Only the last block is allowed to be truncated.
+  Status ParseFinal(const std::vector<util::string_view>& data, uint32_t* out_size);
 
   /// \brief Return the number of parsed rows
   int32_t num_rows() const { return num_rows_; }
@@ -96,12 +113,28 @@ class ARROW_EXPORT BlockParser {
     return Status::OK();
   }
 
+  template <typename Visitor>
+  Status VisitLastRow(Visitor&& visit) const {
+    const auto& values_buffer = values_buffers_.back();
+    const auto values = reinterpret_cast<const ValueDesc*>(values_buffer->data());
+    const auto start_pos =
+        static_cast<int32_t>(values_buffer->size() / sizeof(ValueDesc)) - num_cols_ - 1;
+    for (int32_t col_index = 0; col_index < num_cols_; ++col_index) {
+      auto start = values[start_pos + col_index].offset;
+      auto stop = values[start_pos + col_index + 1].offset;
+      auto quoted = values[start_pos + col_index + 1].quoted;
+      ARROW_RETURN_NOT_OK(visit(parsed_ + start, stop - start, quoted));
+    }
+    return Status::OK();
+  }
+
  protected:
   ARROW_DISALLOW_COPY_AND_ASSIGN(BlockParser);
 
-  Status DoParse(const char* data, uint32_t size, bool is_final, uint32_t* out_size);
+  Status DoParse(const std::vector<util::string_view>& data, bool is_final,
+                 uint32_t* out_size);
   template <typename SpecializedOptions>
-  Status DoParseSpecialized(const char* data, uint32_t size, bool is_final,
+  Status DoParseSpecialized(const std::vector<util::string_view>& data, bool is_final,
                             uint32_t* out_size);
 
   template <typename SpecializedOptions, typename ValuesWriter, typename ParsedWriter>
@@ -145,5 +178,3 @@ class ARROW_EXPORT BlockParser {
 
 }  // namespace csv
 }  // namespace arrow
-
-#endif  // ARROW_CSV_PARSER_H

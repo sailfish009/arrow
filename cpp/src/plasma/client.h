@@ -65,6 +65,13 @@ class ARROW_EXPORT PlasmaClient {
                  const std::string& manager_socket_name = "", int release_delay = 0,
                  int num_retries = -1);
 
+  /// Set runtime options for this client.
+  ///
+  /// \param client_name The name of the client, used in debug messages.
+  /// \param output_memory_quota The memory quota in bytes for objects created by
+  ///        this client.
+  Status SetClientOptions(const std::string& client_name, int64_t output_memory_quota);
+
   /// Create an object in the Plasma Store. Any metadata for this object must be
   /// be passed in when the object is created.
   ///
@@ -100,6 +107,17 @@ class ARROW_EXPORT PlasmaClient {
   /// \return The return status.
   Status CreateAndSeal(const ObjectID& object_id, const std::string& data,
                        const std::string& metadata);
+
+  /// Create and seal multiple objects in the object store. This is an optimization
+  /// of CreateAndSeal to eliminate the cost of IPC per object.
+  ///
+  /// \param object_ids The vector of IDs of the objects to create.
+  /// \param data The vector of data for the objects to create.
+  /// \param metadata The vector of metadata for the objects to create.
+  /// \return The return status.
+  Status CreateAndSealBatch(const std::vector<ObjectID>& object_ids,
+                            const std::vector<std::string>& data,
+                            const std::vector<std::string>& metadata);
 
   /// Get some objects from the Plasma Store. This function will block until the
   /// objects have all been created and sealed in the Plasma Store or the
@@ -213,6 +231,13 @@ class ARROW_EXPORT PlasmaClient {
   /// \return The return status.
   Status Evict(int64_t num_bytes, int64_t& num_bytes_evicted);
 
+  /// Bump objects up in the LRU cache, i.e. treat them as recently accessed.
+  /// Objects that do not exist in the store will be ignored.
+  ///
+  /// \param object_ids The IDs of the objects to bump.
+  /// \return The return status.
+  Status Refresh(const std::vector<ObjectID>& object_ids);
+
   /// Compute the hash of an object in the object store.
   ///
   /// \param object_id The ID of the object we want to hash.
@@ -241,8 +266,9 @@ class ARROW_EXPORT PlasmaClient {
   Status GetNotification(int fd, ObjectID* object_id, int64_t* data_size,
                          int64_t* metadata_size);
 
-  Status DecodeNotification(const uint8_t* buffer, ObjectID* object_id,
-                            int64_t* data_size, int64_t* metadata_size);
+  Status DecodeNotifications(const uint8_t* buffer, std::vector<ObjectID>* object_ids,
+                             std::vector<int64_t>* data_sizes,
+                             std::vector<int64_t>* metadata_sizes);
 
   /// Disconnect from the local plasma instance, including the local store and
   /// manager.
@@ -250,8 +276,19 @@ class ARROW_EXPORT PlasmaClient {
   /// \return The return status.
   Status Disconnect();
 
+  /// Get the current debug string from the plasma store server.
+  ///
+  /// \return The debug string.
+  std::string DebugString();
+
+  /// Get the memory capacity of the store.
+  ///
+  /// \return Memory capacity of the store in bytes.
+  int64_t store_capacity();
+
  private:
   friend class PlasmaBuffer;
+  friend class PlasmaMutableBuffer;
   FRIEND_TEST(TestPlasmaStore, GetTest);
   FRIEND_TEST(TestPlasmaStore, LegacyGetTest);
   FRIEND_TEST(TestPlasmaStore, AbortTest);

@@ -71,22 +71,16 @@ module Arrow
         when ::Array
           append_value_raw
           value.each_with_index do |sub_value, i|
-            self[i].append_value(sub_value)
-          end
-        when Arrow::Struct
-          append_value_raw
-          value.values.each_with_index do |sub_value, i|
-            self[i].append_value(sub_value)
+            self[i].append(sub_value)
           end
         when Hash
           append_value_raw
           value.each do |name, sub_value|
-            self[name].append_value(sub_value)
+            self[name].append(sub_value)
           end
         else
           message =
-            "struct value must be nil, Array, " +
-            "Arrow::Struct or Hash: #{value.inspect}"
+            "struct value must be nil, Array or Hash: #{value.inspect}"
           raise ArgumentError, message
         end
       else

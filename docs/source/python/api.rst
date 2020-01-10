@@ -30,7 +30,9 @@ API Reference
    api/files
    api/tables
    api/ipc
+   api/flight
    api/formats
+   api/filesystems
    api/plasma
    api/cuda
    api/misc

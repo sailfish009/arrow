@@ -48,8 +48,7 @@ use std::sync::Arc;
 
 use csv as csv_crate;
 
-use crate::array::ArrayRef;
-use crate::builder::*;
+use crate::array::{ArrayRef, PrimitiveBuilder, StringBuilder};
 use crate::datatypes::*;
 use crate::error::{ArrowError, Result};
 use crate::record_batch::RecordBatch;
@@ -191,6 +190,8 @@ pub struct Reader<R: Read> {
     record_iter: StringRecordsIntoIter<BufReader<R>>,
     /// Batch size (number of records to load each time)
     batch_size: usize,
+    /// Current line number, used in error reporting
+    line_number: usize,
 }
 
 impl<R: Read> Reader<R> {
@@ -215,6 +216,21 @@ impl<R: Read> Reader<R> {
         )
     }
 
+    /// Returns the schema of the reader, useful for getting the schema without reading
+    /// record batches
+    pub fn schema(&self) -> Arc<Schema> {
+        match &self.projection {
+            Some(projection) => {
+                let fields = self.schema.fields();
+                let projected_fields: Vec<Field> =
+                    projection.iter().map(|i| fields[*i].clone()).collect();
+
+                Arc::new(Schema::new(projected_fields))
+            }
+            None => self.schema.clone(),
+        }
+    }
+
     /// Create a new CsvReader from a `BufReader<R: Read>
     ///
     /// This constructor allows you more flexibility in what records are processed by the
@@ -235,6 +251,7 @@ impl<R: Read> Reader<R> {
             projection,
             record_iter,
             batch_size,
+            line_number: if has_headers { 1 } else { 0 },
         }
     }
 
@@ -242,15 +259,17 @@ impl<R: Read> Reader<R> {
     pub fn next(&mut self) -> Result<Option<RecordBatch>> {
         // read a batch of rows into memory
         let mut rows: Vec<StringRecord> = Vec::with_capacity(self.batch_size);
-        for _ in 0..self.batch_size {
+        for i in 0..self.batch_size {
             match self.record_iter.next() {
                 Some(Ok(r)) => {
                     rows.push(r);
                 }
-                Some(Err(_)) => {
-                    return Err(ArrowError::ParseError(
-                        "Error reading CSV file".to_string(),
-                    ));
+                Some(Err(e)) => {
+                    return Err(ArrowError::ParseError(format!(
+                        "Error parsing line {}: {:?}",
+                        self.line_number + i,
+                        e
+                    )));
                 }
                 None => break,
             }
@@ -302,10 +321,10 @@ impl<R: Read> Reader<R> {
                         self.build_primitive_array::<Float64Type>(rows, i)
                     }
                     &DataType::Utf8 => {
-                        let mut builder = BinaryBuilder::new(rows.len());
+                        let mut builder = StringBuilder::new(rows.len());
                         for row_index in 0..rows.len() {
                             match rows[row_index].get(*i) {
-                                Some(s) => builder.append_string(s).unwrap(),
+                                Some(s) => builder.append_value(s).unwrap(),
                                 _ => builder.append(false).unwrap(),
                             }
                         }
@@ -318,6 +337,8 @@ impl<R: Read> Reader<R> {
                 }
             })
             .collect();
+
+        self.line_number += rows.len();
 
         let schema_fields = self.schema.fields();
 
@@ -358,8 +379,9 @@ impl<R: Read> Reader<R> {
                         Err(_) => {
                             // TODO: we should surface the underlying error here.
                             return Err(ArrowError::ParseError(format!(
-                                "Error while parsing value {}",
-                                s
+                                "Error while parsing value {} at line {}",
+                                s,
+                                self.line_number + row_index
                             )));
                         }
                     }
@@ -383,7 +405,7 @@ pub struct ReaderBuilder {
     /// If schema inference is run on a file with no headers, default column names
     /// are created.
     has_headers: bool,
-    /// An optional column delimiter. Defauits to `b','`
+    /// An optional column delimiter. Defaults to `b','`
     delimiter: Option<u8>,
     /// Optional maximum number of records to read during schema inference
     ///
@@ -503,6 +525,7 @@ impl ReaderBuilder {
             projection: self.projection.clone(),
             record_iter,
             batch_size: self.batch_size,
+            line_number: if self.has_headers { 1 } else { 0 },
         })
     }
 }
@@ -527,7 +550,8 @@ mod tests {
 
         let file = File::open("test/data/uk_cities.csv").unwrap();
 
-        let mut csv = Reader::new(file, Arc::new(schema), false, 1024, None);
+        let mut csv = Reader::new(file, Arc::new(schema.clone()), false, 1024, None);
+        assert_eq!(Arc::new(schema), csv.schema());
         let batch = csv.next().unwrap().unwrap();
         assert_eq!(37, batch.num_rows());
         assert_eq!(3, batch.num_columns());
@@ -544,12 +568,10 @@ mod tests {
         let city = batch
             .column(0)
             .as_any()
-            .downcast_ref::<BinaryArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
 
-        let city_name: String = String::from_utf8(city.value(13).to_vec()).unwrap();
-
-        assert_eq!("Aberdeen, Aberdeen City, UK", city_name);
+        assert_eq!("Aberdeen, Aberdeen City, UK", city.value(13));
     }
 
     #[test]
@@ -585,6 +607,12 @@ mod tests {
         let builder = ReaderBuilder::new().has_headers(true).infer_schema(None);
 
         let mut csv = builder.build(file).unwrap();
+        let expected_schema = Schema::new(vec![
+            Field::new("city", DataType::Utf8, false),
+            Field::new("lat", DataType::Float64, false),
+            Field::new("lng", DataType::Float64, false),
+        ]);
+        assert_eq!(Arc::new(expected_schema), csv.schema());
         let batch = csv.next().unwrap().unwrap();
         assert_eq!(37, batch.num_rows());
         assert_eq!(3, batch.num_columns());
@@ -601,12 +629,10 @@ mod tests {
         let city = batch
             .column(0)
             .as_any()
-            .downcast_ref::<BinaryArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
 
-        let city_name: String = String::from_utf8(city.value(13).to_vec()).unwrap();
-
-        assert_eq!("Aberdeen, Aberdeen City, UK", city_name);
+        assert_eq!("Aberdeen, Aberdeen City, UK", city.value(13));
     }
 
     #[test]
@@ -616,14 +642,16 @@ mod tests {
         let builder = ReaderBuilder::new().infer_schema(None);
 
         let mut csv = builder.build(file).unwrap();
-        let batch = csv.next().unwrap().unwrap();
 
         // csv field names should be 'column_{number}'
-        let schema = batch.schema();
+        let schema = csv.schema();
         assert_eq!("column_1", schema.field(0).name());
         assert_eq!("column_2", schema.field(1).name());
         assert_eq!("column_3", schema.field(2).name());
+        let batch = csv.next().unwrap().unwrap();
+        let batch_schema = batch.schema();
 
+        assert_eq!(&schema, batch_schema);
         assert_eq!(37, batch.num_rows());
         assert_eq!(3, batch.num_columns());
 
@@ -639,12 +667,10 @@ mod tests {
         let city = batch
             .column(0)
             .as_any()
-            .downcast_ref::<BinaryArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
 
-        let city_name: String = String::from_utf8(city.value(13).to_vec()).unwrap();
-
-        assert_eq!("Aberdeen, Aberdeen City, UK", city_name);
+        assert_eq!("Aberdeen, Aberdeen City, UK", city.value(13));
     }
 
     #[test]
@@ -658,7 +684,13 @@ mod tests {
         let file = File::open("test/data/uk_cities.csv").unwrap();
 
         let mut csv = Reader::new(file, Arc::new(schema), false, 1024, Some(vec![0, 1]));
+        let projected_schema = Arc::new(Schema::new(vec![
+            Field::new("city", DataType::Utf8, false),
+            Field::new("lat", DataType::Float64, false),
+        ]));
+        assert_eq!(projected_schema.clone(), csv.schema());
         let batch = csv.next().unwrap().unwrap();
+        assert_eq!(&projected_schema, batch.schema());
         assert_eq!(37, batch.num_rows());
         assert_eq!(2, batch.num_columns());
     }
@@ -717,5 +749,33 @@ mod tests {
         assert_eq!(true, batch.column(1).is_null(2));
         assert_eq!(false, batch.column(1).is_null(3));
         assert_eq!(false, batch.column(1).is_null(4));
+    }
+
+    #[test]
+    fn test_parse_invalid_csv() {
+        let file = File::open("test/data/various_types_invalid.csv").unwrap();
+
+        let schema = Schema::new(vec![
+            Field::new("c_int", DataType::UInt64, false),
+            Field::new("c_float", DataType::Float32, false),
+            Field::new("c_string", DataType::Utf8, false),
+            Field::new("c_bool", DataType::Boolean, false),
+        ]);
+
+        let builder = ReaderBuilder::new()
+            .with_schema(Arc::new(schema))
+            .has_headers(true)
+            .with_delimiter(b'|')
+            .with_batch_size(512)
+            .with_projection(vec![0, 1, 2, 3]);
+
+        let mut csv = builder.build(file).unwrap();
+        match csv.next() {
+            Err(e) => assert_eq!(
+                "ParseError(\"Error while parsing value 4.x4 at line 4\")",
+                format!("{:?}", e)
+            ),
+            Ok(_) => panic!("should have failed"),
+        }
     }
 }

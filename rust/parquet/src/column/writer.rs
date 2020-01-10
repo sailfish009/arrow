@@ -115,6 +115,42 @@ pub fn get_typed_column_writer<T: DataType>(
     }
 }
 
+/// Similar to `get_typed_column_writer` but returns a reference.
+pub fn get_typed_column_writer_ref<T: DataType>(
+    col_writer: &ColumnWriter,
+) -> &ColumnWriterImpl<T> {
+    match col_writer {
+        ColumnWriter::BoolColumnWriter(ref r) => unsafe { mem::transmute(r) },
+        ColumnWriter::Int32ColumnWriter(ref r) => unsafe { mem::transmute(r) },
+        ColumnWriter::Int64ColumnWriter(ref r) => unsafe { mem::transmute(r) },
+        ColumnWriter::Int96ColumnWriter(ref r) => unsafe { mem::transmute(r) },
+        ColumnWriter::FloatColumnWriter(ref r) => unsafe { mem::transmute(r) },
+        ColumnWriter::DoubleColumnWriter(ref r) => unsafe { mem::transmute(r) },
+        ColumnWriter::ByteArrayColumnWriter(ref r) => unsafe { mem::transmute(r) },
+        ColumnWriter::FixedLenByteArrayColumnWriter(ref r) => unsafe {
+            mem::transmute(r)
+        },
+    }
+}
+
+/// Similar to `get_typed_column_writer` but returns a reference.
+pub fn get_typed_column_writer_mut<T: DataType>(
+    col_writer: &mut ColumnWriter,
+) -> &mut ColumnWriterImpl<T> {
+    match col_writer {
+        ColumnWriter::BoolColumnWriter(ref mut r) => unsafe { mem::transmute(r) },
+        ColumnWriter::Int32ColumnWriter(ref mut r) => unsafe { mem::transmute(r) },
+        ColumnWriter::Int64ColumnWriter(ref mut r) => unsafe { mem::transmute(r) },
+        ColumnWriter::Int96ColumnWriter(ref mut r) => unsafe { mem::transmute(r) },
+        ColumnWriter::FloatColumnWriter(ref mut r) => unsafe { mem::transmute(r) },
+        ColumnWriter::DoubleColumnWriter(ref mut r) => unsafe { mem::transmute(r) },
+        ColumnWriter::ByteArrayColumnWriter(ref mut r) => unsafe { mem::transmute(r) },
+        ColumnWriter::FixedLenByteArrayColumnWriter(ref mut r) => unsafe {
+            mem::transmute(r)
+        },
+    }
+}
+
 /// Typed column writer for a primitive column.
 pub struct ColumnWriterImpl<T: DataType> {
     // Column writer properties
@@ -421,7 +457,15 @@ impl<T: DataType> ColumnWriterImpl<T> {
     /// Returns true if there is enough data for a data page, false otherwise.
     #[inline]
     fn should_add_data_page(&self) -> bool {
-        self.encoder.estimated_data_encoded_size() >= self.props.data_pagesize_limit()
+        match self.dict_encoder {
+            Some(ref encoder) => {
+                encoder.estimated_data_encoded_size() >= self.props.data_pagesize_limit()
+            }
+            None => {
+                self.encoder.estimated_data_encoded_size()
+                    >= self.props.data_pagesize_limit()
+            }
+        }
     }
 
     /// Performs dictionary fallback.
@@ -821,8 +865,6 @@ impl EncodingWriteSupport for ColumnWriterImpl<FixedLenByteArrayType> {
 mod tests {
     use super::*;
 
-    use std::error::Error;
-
     use rand::distributions::range::SampleRange;
 
     use crate::column::{
@@ -848,8 +890,8 @@ mod tests {
         assert!(res.is_err());
         if let Err(err) = res {
             assert_eq!(
-                err.description(),
-                "Inconsistent length of definition and repetition levels: 3 != 2"
+                format!("{}", err),
+                "Parquet error: Inconsistent length of definition and repetition levels: 3 != 2"
             );
         }
     }
@@ -863,8 +905,8 @@ mod tests {
         assert!(res.is_err());
         if let Err(err) = res {
             assert_eq!(
-                err.description(),
-                "Definition levels are required, because max definition level = 1"
+                format!("{}", err),
+                "Parquet error: Definition levels are required, because max definition level = 1"
             );
         }
     }
@@ -878,8 +920,8 @@ mod tests {
         assert!(res.is_err());
         if let Err(err) = res {
             assert_eq!(
-                err.description(),
-                "Repetition levels are required, because max repetition level = 1"
+                format!("{}", err),
+                "Parquet error: Repetition levels are required, because max repetition level = 1"
             );
         }
     }
@@ -893,8 +935,8 @@ mod tests {
         assert!(res.is_err());
         if let Err(err) = res {
             assert_eq!(
-                err.description(),
-                "Expected to write 4 values, but have only 2"
+                format!("{}", err),
+                "Parquet error: Expected to write 4 values, but have only 2"
             );
         }
     }
@@ -925,7 +967,10 @@ mod tests {
         let res = writer.write_dictionary_page();
         assert!(res.is_err());
         if let Err(err) = res {
-            assert_eq!(err.description(), "Dictionary encoder is not set");
+            assert_eq!(
+                format!("{}", err),
+                "Parquet error: Dictionary encoder is not set"
+            );
         }
     }
 
@@ -1376,6 +1421,51 @@ mod tests {
             ::std::i32::MAX,
             10,
             10,
+        );
+    }
+
+    #[test]
+    fn test_column_writer_add_data_pages_with_dict() {
+        // ARROW-5129: Test verifies that we add data page in case of dictionary encoding
+        // and no fallback occurred so far.
+        let file = get_temp_file("test_column_writer_add_data_pages_with_dict", &[]);
+        let sink = FileSink::new(&file);
+        let page_writer = Box::new(SerializedPageWriter::new(sink));
+        let props = Rc::new(
+            WriterProperties::builder()
+                .set_data_pagesize_limit(15) // actually each page will have size 15-18 bytes
+                .set_write_batch_size(3) // write 3 values at a time
+                .build(),
+        );
+        let data = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut writer = get_test_column_writer::<Int32Type>(page_writer, 0, 0, props);
+        writer.write_batch(data, None, None).unwrap();
+        let (bytes_written, _, _) = writer.close().unwrap();
+
+        // Read pages and check the sequence
+        let source = FileSource::new(&file, 0, bytes_written as usize);
+        let mut page_reader = Box::new(
+            SerializedPageReader::new(
+                source,
+                data.len() as i64,
+                Compression::UNCOMPRESSED,
+                Int32Type::get_physical_type(),
+            )
+            .unwrap(),
+        );
+        let mut res = Vec::new();
+        while let Some(page) = page_reader.get_next_page().unwrap() {
+            res.push((page.page_type(), page.num_values()));
+        }
+        assert_eq!(
+            res,
+            vec![
+                (PageType::DICTIONARY_PAGE, 10),
+                (PageType::DATA_PAGE, 3),
+                (PageType::DATA_PAGE, 3),
+                (PageType::DATA_PAGE, 3),
+                (PageType::DATA_PAGE, 1)
+            ]
         );
     }
 

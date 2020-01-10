@@ -20,7 +20,6 @@ class TestCast < Test::Unit::TestCase
   include Helper::Omittable
 
   def test_safe
-    require_gi(1, 42, 0)
     data = [-1, 2, nil]
     assert_equal(build_int32_array(data),
                  build_int8_array(data).cast(Arrow::Int32DataType.new))
@@ -28,7 +27,6 @@ class TestCast < Test::Unit::TestCase
 
   sub_test_case("allow-int-overflow") do
     def test_default
-      require_gi(1, 42, 0)
       assert_raise(Arrow::Error::Invalid) do
         build_int32_array([128]).cast(Arrow::Int8DataType.new)
       end
@@ -45,7 +43,6 @@ class TestCast < Test::Unit::TestCase
 
   sub_test_case("allow-time-truncate") do
     def test_default
-      require_gi(1, 42, 0)
       after_epoch = 1504953190854 # 2017-09-09T10:33:10.854Z
       second_timestamp = Arrow::TimestampDataType.new(:second)
       assert_raise(Arrow::Error::Invalid) do
@@ -68,7 +65,6 @@ class TestCast < Test::Unit::TestCase
 
   sub_test_case("allow-float-truncate") do
     def test_default
-      require_gi(1, 42, 0)
       assert_raise(Arrow::Error::Invalid) do
         build_float_array([1.1]).cast(Arrow::Int8DataType.new)
       end
@@ -80,6 +76,22 @@ class TestCast < Test::Unit::TestCase
       int8_data_type = Arrow::Int8DataType.new
       assert_equal(build_int8_array([1]),
                    build_float_array([1.1]).cast(int8_data_type, options))
+    end
+  end
+
+  sub_test_case("allow-invalid-utf8") do
+    def test_default
+      assert_raise(Arrow::Error::Invalid) do
+        build_binary_array(["\xff"]).cast(Arrow::StringDataType.new)
+      end
+    end
+
+    def test_true
+      options = Arrow::CastOptions.new
+      options.allow_invalid_utf8 = true
+      string_data_type = Arrow::StringDataType.new
+      assert_equal(build_string_array(["\xff"]),
+                   build_binary_array(["\xff"]).cast(string_data_type, options))
     end
   end
 end

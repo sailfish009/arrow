@@ -16,8 +16,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-export THRIFT_VERSION=0.11.0
-wget http://archive.apache.org/dist/thrift/${THRIFT_VERSION}/thrift-${THRIFT_VERSION}.tar.gz
+export THRIFT_VERSION=0.12.0
+wget https://archive.apache.org/dist/thrift/${THRIFT_VERSION}/thrift-${THRIFT_VERSION}.tar.gz
 tar xf thrift-${THRIFT_VERSION}.tar.gz
 pushd thrift-${THRIFT_VERSION}
 mkdir build-tmp
@@ -27,14 +27,15 @@ cmake -DCMAKE_BUILD_TYPE=release \
     "-DCMAKE_C_FLAGS=-fPIC" \
     "-DCMAKE_INSTALL_PREFIX=/usr" \
     "-DCMAKE_INSTALL_RPATH=/usr/lib" \
-    "-DBUILD_SHARED_LIBS=OFF" \
-    "-DBUILD_TESTING=OFF" \
-    "-DWITH_QT4=OFF" \
-    "-DWITH_C_GLIB=OFF" \
-    "-DWITH_JAVA=OFF" \
-    "-DWITH_PYTHON=OFF" \
-    "-DWITH_CPP=ON" \
-    "-DWITH_STATIC_LIB=ON" \
+    -DBUILD_EXAMPLES=OFF \
+    -DBUILD_TESTING=OFF \
+    -DWITH_QT4=OFF \
+    -DWITH_C_GLIB=OFF \
+    -DWITH_JAVA=OFF \
+    -DWITH_PYTHON=OFF \
+    -DWITH_CPP=ON \
+    -DWITH_STATIC_LIB=ON \
+    -DWITH_SHARED_LIB=OFF \
     -DBoost_NAMESPACE=arrow_boost \
     -DBOOST_ROOT=/arrow_boost_dist \
     -GNinja ..

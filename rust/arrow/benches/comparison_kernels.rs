@@ -22,7 +22,6 @@ use criterion::Criterion;
 extern crate arrow;
 
 use arrow::array::*;
-use arrow::builder::*;
 use arrow::compute::*;
 
 fn create_array(size: usize) -> Float32Array {
@@ -52,57 +51,25 @@ pub fn neq_no_simd(size: usize) {
 pub fn lt_no_simd(size: usize) {
     let arr_a = create_array(size);
     let arr_b = create_array(size);
-    criterion::black_box(
-        compare_op(&arr_a, &arr_b, |a, b| match (a, b) {
-            (None, None) => false,
-            (None, _) => true,
-            (_, None) => false,
-            (Some(aa), Some(bb)) => aa < bb,
-        })
-        .unwrap(),
-    );
+    criterion::black_box(compare_op(&arr_a, &arr_b, |a, b| a < b).unwrap());
 }
 
 fn lt_eq_no_simd(size: usize) {
     let arr_a = create_array(size);
     let arr_b = create_array(size);
-    criterion::black_box(
-        compare_op(&arr_a, &arr_b, |a, b| match (a, b) {
-            (None, None) => true,
-            (None, _) => true,
-            (_, None) => false,
-            (Some(aa), Some(bb)) => aa <= bb,
-        })
-        .unwrap(),
-    );
+    criterion::black_box(compare_op(&arr_a, &arr_b, |a, b| a <= b).unwrap());
 }
 
 pub fn gt_no_simd(size: usize) {
     let arr_a = create_array(size);
     let arr_b = create_array(size);
-    criterion::black_box(
-        compare_op(&arr_a, &arr_b, |a, b| match (a, b) {
-            (None, None) => false,
-            (None, _) => false,
-            (_, None) => true,
-            (Some(aa), Some(bb)) => aa > bb,
-        })
-        .unwrap(),
-    );
+    criterion::black_box(compare_op(&arr_a, &arr_b, |a, b| a > b).unwrap());
 }
 
 fn gt_eq_no_simd(size: usize) {
     let arr_a = create_array(size);
     let arr_b = create_array(size);
-    criterion::black_box(
-        compare_op(&arr_a, &arr_b, |a, b| match (a, b) {
-            (None, None) => true,
-            (None, _) => false,
-            (_, None) => true,
-            (Some(aa), Some(bb)) => aa >= bb,
-        })
-        .unwrap(),
-    );
+    criterion::black_box(compare_op(&arr_a, &arr_b, |a, b| a >= b).unwrap());
 }
 
 fn eq_simd(size: usize) {

@@ -18,11 +18,12 @@
 //! Projection Push Down optimizer rule ensures that only referenced columns are
 //! loaded into memory
 
+use crate::error::{ExecutionError, Result};
 use crate::logicalplan::Expr;
 use crate::logicalplan::LogicalPlan;
 use crate::optimizer::optimizer::OptimizerRule;
+use crate::optimizer::utils;
 use arrow::datatypes::{Field, Schema};
-use arrow::error::{ArrowError, Result};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -39,6 +40,7 @@ impl OptimizerRule for ProjectionPushDown {
 }
 
 impl ProjectionPushDown {
+    #[allow(missing_docs)]
     pub fn new() -> Self {
         Self {}
     }
@@ -56,7 +58,7 @@ impl ProjectionPushDown {
                 schema,
             } => {
                 // collect all columns referenced by projection expressions
-                self.collect_exprs(&expr, accum);
+                utils::exprlist_to_column_indices(&expr, accum);
 
                 // push projection down
                 let input = self.optimize_plan(&input, accum, mapping)?;
@@ -72,7 +74,7 @@ impl ProjectionPushDown {
             }
             LogicalPlan::Selection { expr, input } => {
                 // collect all columns referenced by filter expression
-                self.collect_expr(expr, accum);
+                utils::expr_to_column_indices(expr, accum);
 
                 // push projection down
                 let input = self.optimize_plan(&input, accum, mapping)?;
@@ -92,8 +94,8 @@ impl ProjectionPushDown {
                 schema,
             } => {
                 // collect all columns referenced by grouping and aggregate expressions
-                self.collect_exprs(&group_expr, accum);
-                self.collect_exprs(&aggr_expr, accum);
+                utils::exprlist_to_column_indices(&group_expr, accum);
+                utils::exprlist_to_column_indices(&aggr_expr, accum);
 
                 // push projection down
                 let input = self.optimize_plan(&input, accum, mapping)?;
@@ -115,7 +117,7 @@ impl ProjectionPushDown {
                 schema,
             } => {
                 // collect all columns referenced by sort expressions
-                self.collect_exprs(&expr, accum);
+                utils::exprlist_to_column_indices(&expr, accum);
 
                 // push projection down
                 let input = self.optimize_plan(&input, accum, mapping)?;
@@ -137,11 +139,18 @@ impl ProjectionPushDown {
             LogicalPlan::TableScan {
                 schema_name,
                 table_name,
-                schema,
+                table_schema,
+                projection,
                 ..
             } => {
-                // once we reach the table scan, we can use the accumulated set of column indexes as
-                // the projection in the table scan
+                if projection.is_some() {
+                    return Err(ExecutionError::General(
+                        "Cannot run projection push-down rule more than once".to_string(),
+                    ));
+                }
+
+                // once we reach the table scan, we can use the accumulated set of column
+                // indexes as the projection in the table scan
                 let mut projection: Vec<usize> = Vec::with_capacity(accum.len());
                 accum.iter().for_each(|i| projection.push(*i));
 
@@ -151,20 +160,23 @@ impl ProjectionPushDown {
                 // create the projected schema
                 let mut projected_fields: Vec<Field> =
                     Vec::with_capacity(projection.len());
-                for i in 0..projection.len() {
-                    projected_fields.push(schema.fields()[i].clone());
+                for i in &projection {
+                    projected_fields.push(table_schema.fields()[*i].clone());
                 }
                 let projected_schema = Schema::new(projected_fields);
 
-                // now that the table scan is returning a different schema we need to create a
-                // mapping from the original column index to the new column index so that we
-                // can rewrite expressions as we walk back up the tree
+                // now that the table scan is returning a different schema we need to
+                // create a mapping from the original column index to the
+                // new column index so that we can rewrite expressions as
+                // we walk back up the tree
 
                 if mapping.len() != 0 {
-                    return Err(ArrowError::ComputeError("illegal state".to_string()));
+                    return Err(ExecutionError::InternalError(
+                        "illegal state".to_string(),
+                    ));
                 }
 
-                for i in 0..schema.fields().len() {
+                for i in 0..table_schema.fields().len() {
                     if let Some(n) = projection.iter().position(|v| *v == i) {
                         mapping.insert(i, n);
                     }
@@ -174,7 +186,8 @@ impl ProjectionPushDown {
                 Ok(Arc::new(LogicalPlan::TableScan {
                     schema_name: schema_name.to_string(),
                     table_name: table_name.to_string(),
-                    schema: Arc::new(projected_schema),
+                    table_schema: table_schema.clone(),
+                    projected_schema: Arc::new(projected_schema),
                     projection: Some(projection),
                 }))
             }
@@ -187,29 +200,19 @@ impl ProjectionPushDown {
                 input: input.clone(),
                 schema: schema.clone(),
             })),
-        }
-    }
-
-    fn collect_exprs(&self, expr: &Vec<Expr>, accum: &mut HashSet<usize>) {
-        expr.iter().for_each(|e| self.collect_expr(e, accum));
-    }
-
-    fn collect_expr(&self, expr: &Expr, accum: &mut HashSet<usize>) {
-        match expr {
-            Expr::Column(i) => {
-                accum.insert(*i);
-            }
-            Expr::Literal(_) => { /* not needed */ }
-            Expr::IsNull(e) => self.collect_expr(e, accum),
-            Expr::IsNotNull(e) => self.collect_expr(e, accum),
-            Expr::BinaryExpr { left, right, .. } => {
-                self.collect_expr(left, accum);
-                self.collect_expr(right, accum);
-            }
-            Expr::Cast { expr, .. } => self.collect_expr(expr, accum),
-            Expr::Sort { expr, .. } => self.collect_expr(expr, accum),
-            Expr::AggregateFunction { args, .. } => self.collect_exprs(args, accum),
-            Expr::ScalarFunction { args, .. } => self.collect_exprs(args, accum),
+            LogicalPlan::CreateExternalTable {
+                schema,
+                name,
+                location,
+                file_type,
+                header_row,
+            } => Ok(Arc::new(LogicalPlan::CreateExternalTable {
+                schema: schema.clone(),
+                name: name.to_string(),
+                location: location.to_string(),
+                file_type: file_type.clone(),
+                header_row: *header_row,
+            })),
         }
     }
 
@@ -269,7 +272,7 @@ impl ProjectionPushDown {
     fn new_index(&self, mapping: &HashMap<usize, usize>, i: &usize) -> Result<usize> {
         match mapping.get(i) {
             Some(j) => Ok(*j),
-            _ => Err(ArrowError::ComputeError(
+            _ => Err(ExecutionError::InternalError(
                 "Internal error computing new column index".to_string(),
             )),
         }
@@ -386,12 +389,15 @@ mod tests {
         // check that table scan schema now contains 2 columns
         match optimized_plan.as_ref().borrow() {
             LogicalPlan::Projection { input, .. } => match input.as_ref().borrow() {
-                LogicalPlan::TableScan { ref schema, .. } => {
-                    assert_eq!(2, schema.fields().len());
+                LogicalPlan::TableScan {
+                    ref projected_schema,
+                    ..
+                } => {
+                    assert_eq!(2, projected_schema.fields().len());
                 }
-                _ => panic!(),
+                _ => assert!(false),
             },
-            _ => panic!(),
+            _ => assert!(false),
         }
     }
 
@@ -408,14 +414,16 @@ mod tests {
 
     /// all tests share a common table
     fn test_table_scan() -> LogicalPlan {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::UInt32, false),
+            Field::new("b", DataType::UInt32, false),
+            Field::new("c", DataType::UInt32, false),
+        ]));
         TableScan {
             schema_name: "default".to_string(),
             table_name: "test".to_string(),
-            schema: Arc::new(Schema::new(vec![
-                Field::new("a", DataType::UInt32, false),
-                Field::new("b", DataType::UInt32, false),
-                Field::new("c", DataType::UInt32, false),
-            ])),
+            table_schema: schema.clone(),
+            projected_schema: schema,
             projection: None,
         }
     }

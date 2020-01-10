@@ -15,6 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
+from __future__ import absolute_import
+
 import os
 import inspect
 import posixpath
@@ -414,12 +416,14 @@ def resolve_filesystem_and_path(where, filesystem=None):
         return _ensure_filesystem(filesystem), path
 
     parsed_uri = urlparse(path)
-    if parsed_uri.scheme == 'hdfs':
+    if parsed_uri.scheme == 'hdfs' or parsed_uri.scheme == 'viewfs':
         # Input is hdfs URI such as hdfs://host:port/myfile.parquet
         netloc_split = parsed_uri.netloc.split(':')
         host = netloc_split[0]
         if host == '':
             host = 'default'
+        else:
+            host = parsed_uri.scheme + "://" + host
         port = 0
         if len(netloc_split) == 2 and netloc_split[1].isnumeric():
             port = int(netloc_split[1])

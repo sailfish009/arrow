@@ -23,16 +23,15 @@
 #include <string>
 #include <vector>
 
-#include "arrow/array.h"
 #include "arrow/record_batch.h"
 #include "arrow/type.h"
+#include "arrow/type_fwd.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
 
-class MemoryPool;
-class Status;
+using ArrayVector = std::vector<std::shared_ptr<Array>>;
 
 /// \class ChunkedArray
 /// \brief A data structure managing a list of primitive Arrow arrays logically
@@ -41,7 +40,7 @@ class ARROW_EXPORT ChunkedArray {
  public:
   /// \brief Construct a chunked array from a vector of arrays
   ///
-  /// The vector should be non-empty and all its elements should have the same
+  /// The vector must be non-empty and all its elements must have the same
   /// data type.
   explicit ChunkedArray(const ArrayVector& chunks);
 
@@ -88,6 +87,12 @@ class ARROW_EXPORT ChunkedArray {
   /// \param[out] out The resulting vector of arrays
   Status Flatten(MemoryPool* pool, std::vector<std::shared_ptr<ChunkedArray>>* out) const;
 
+  /// Construct a zero-copy view of this chunked array with the given
+  /// type. Calls Array::View on each constituent chunk. Always succeeds if
+  /// there are zero chunks
+  Status View(const std::shared_ptr<DataType>& type,
+              std::shared_ptr<ChunkedArray>* out) const;
+
   std::shared_ptr<DataType> type() const { return type_; }
 
   /// \brief Determine if two chunked arrays are equal.
@@ -97,6 +102,24 @@ class ARROW_EXPORT ChunkedArray {
   bool Equals(const ChunkedArray& other) const;
   /// \brief Determine if two chunked arrays are equal.
   bool Equals(const std::shared_ptr<ChunkedArray>& other) const;
+
+  /// \brief Perform cheap validation checks to determine obvious inconsistencies
+  /// within the chunk array's internal data.
+  ///
+  /// This is O(k*m) where k is the number of array descendents,
+  /// and m is the number of chunks.
+  ///
+  /// \return Status
+  Status Validate() const;
+
+  /// \brief Perform extensive validation checks to determine inconsistencies
+  /// within the chunk array's internal data.
+  ///
+  /// This is O(k*n) where k is the number of array descendents,
+  /// and n is the length in elements.
+  ///
+  /// \return Status
+  Status ValidateFull() const;
 
  protected:
   ArrayVector chunks_;
@@ -108,111 +131,22 @@ class ARROW_EXPORT ChunkedArray {
   ARROW_DISALLOW_COPY_AND_ASSIGN(ChunkedArray);
 };
 
-/// \class Column
-/// \brief An immutable column data structure consisting of a field (type
-/// metadata) and a chunked data array
-class ARROW_EXPORT Column {
- public:
-  /// \brief Construct a column from a vector of arrays
-  ///
-  /// The array chunks' datatype must match the field's datatype.
-  Column(const std::shared_ptr<Field>& field, const ArrayVector& chunks);
-  /// \brief Construct a column from a chunked array
-  ///
-  /// The chunked array's datatype must match the field's datatype.
-  Column(const std::shared_ptr<Field>& field, const std::shared_ptr<ChunkedArray>& data);
-  /// \brief Construct a column from a single array
-  ///
-  /// The array's datatype must match the field's datatype.
-  Column(const std::shared_ptr<Field>& field, const std::shared_ptr<Array>& data);
-
-  /// \brief Construct a column from a name and an array
-  ///
-  /// A field with the given name and the array's datatype is automatically created.
-  Column(const std::string& name, const std::shared_ptr<Array>& data);
-  /// \brief Construct a column from a name and a chunked array
-  ///
-  /// A field with the given name and the array's datatype is automatically created.
-  Column(const std::string& name, const std::shared_ptr<ChunkedArray>& data);
-
-  int64_t length() const { return data_->length(); }
-
-  int64_t null_count() const { return data_->null_count(); }
-
-  std::shared_ptr<Field> field() const { return field_; }
-
-  /// \brief The column name
-  /// \return the column's name in the passed metadata
-  const std::string& name() const { return field_->name(); }
-
-  /// \brief The column type
-  /// \return the column's type according to the metadata
-  std::shared_ptr<DataType> type() const { return field_->type(); }
-
-  /// \brief The column data as a chunked array
-  /// \return the column's data as a chunked logical array
-  std::shared_ptr<ChunkedArray> data() const { return data_; }
-
-  /// \brief Construct a zero-copy slice of the column with the indicated
-  /// offset and length
-  ///
-  /// \param[in] offset the position of the first element in the constructed
-  /// slice
-  /// \param[in] length the length of the slice. If there are not enough
-  /// elements in the column, the length will be adjusted accordingly
-  ///
-  /// \return a new object wrapped in std::shared_ptr<Column>
-  std::shared_ptr<Column> Slice(int64_t offset, int64_t length) const {
-    return std::make_shared<Column>(field_, data_->Slice(offset, length));
-  }
-
-  /// \brief Slice from offset until end of the column
-  std::shared_ptr<Column> Slice(int64_t offset) const {
-    return std::make_shared<Column>(field_, data_->Slice(offset));
-  }
-
-  /// \brief Flatten this column as a vector of columns
-  ///
-  /// \param[in] pool The pool for buffer allocations, if any
-  /// \param[out] out The resulting vector of arrays
-  Status Flatten(MemoryPool* pool, std::vector<std::shared_ptr<Column>>* out) const;
-
-  /// \brief Determine if two columns are equal.
-  ///
-  /// Two columns can be equal only if they have equal datatypes.
-  /// However, they may be equal even if they have different chunkings.
-  bool Equals(const Column& other) const;
-  /// \brief Determine if the two columns are equal.
-  bool Equals(const std::shared_ptr<Column>& other) const;
-
-  /// \brief Verify that the column's array data is consistent with the passed
-  /// field's metadata
-  Status ValidateData();
-
- protected:
-  std::shared_ptr<Field> field_;
-  std::shared_ptr<ChunkedArray> data_;
-
- private:
-  ARROW_DISALLOW_COPY_AND_ASSIGN(Column);
-};
-
 /// \class Table
 /// \brief Logical table as sequence of chunked arrays
 class ARROW_EXPORT Table {
  public:
   virtual ~Table() = default;
 
-  /// \brief Construct Table from schema and columns
+  /// \brief Construct a Table from schema and columns
   /// If columns is zero-length, the table's number of rows is zero
   /// \param schema The table schema (column types)
-  /// \param columns The table's columns
+  /// \param columns The table's columns as chunked arrays
   /// \param num_rows number of rows in table, -1 (default) to infer from columns
-  static std::shared_ptr<Table> Make(const std::shared_ptr<Schema>& schema,
-                                     const std::vector<std::shared_ptr<Column>>& columns,
-                                     int64_t num_rows = -1);
+  static std::shared_ptr<Table> Make(
+      const std::shared_ptr<Schema>& schema,
+      const std::vector<std::shared_ptr<ChunkedArray>>& columns, int64_t num_rows = -1);
 
-  /// \brief Construct Table from schema and arrays
+  /// \brief Construct a Table from schema and arrays
   /// \param schema The table schema (column types)
   /// \param arrays The table's columns as arrays
   /// \param num_rows number of rows in table, -1 (default) to infer from columns
@@ -220,7 +154,7 @@ class ARROW_EXPORT Table {
                                      const std::vector<std::shared_ptr<Array>>& arrays,
                                      int64_t num_rows = -1);
 
-  /// \brief Construct table from RecordBatches, using schema supplied by the first
+  /// \brief Construct a Table from RecordBatches, using schema supplied by the first
   /// RecordBatch.
   ///
   /// \param[in] batches a std::vector of record batches
@@ -230,7 +164,7 @@ class ARROW_EXPORT Table {
       const std::vector<std::shared_ptr<RecordBatch>>& batches,
       std::shared_ptr<Table>* table);
 
-  /// Construct table from RecordBatches, using supplied schema. There may be
+  /// \brief Construct a Table from RecordBatches, using supplied schema. There may be
   /// zero record batches
   ///
   /// \param[in] schema the arrow::Schema for each batch
@@ -242,16 +176,42 @@ class ARROW_EXPORT Table {
       const std::vector<std::shared_ptr<RecordBatch>>& batches,
       std::shared_ptr<Table>* table);
 
+  /// \brief Construct a Table from a chunked StructArray. One column will be produced
+  /// for each field of the StructArray.
+  ///
+  /// \param[in] array a chunked StructArray
+  /// \param[out] table the returned table
+  /// \return Status
+  static Status FromChunkedStructArray(const std::shared_ptr<ChunkedArray>& array,
+                                       std::shared_ptr<Table>* table);
+
   /// Return the table schema
   std::shared_ptr<Schema> schema() const { return schema_; }
 
   /// Return a column by index
-  virtual std::shared_ptr<Column> column(int i) const = 0;
+  virtual std::shared_ptr<ChunkedArray> column(int i) const = 0;
+
+  /// Return a column's field by index
+  std::shared_ptr<Field> field(int i) const { return schema_->field(i); }
+
+  /// \brief Construct a zero-copy slice of the table with the
+  /// indicated offset and length
+  ///
+  /// \param[in] offset the index of the first row in the constructed
+  /// slice
+  /// \param[in] length the number of rows of the slice. If there are not enough
+  /// rows in the table, the length will be adjusted accordingly
+  ///
+  /// \return a new object wrapped in std::shared_ptr<Table>
+  virtual std::shared_ptr<Table> Slice(int64_t offset, int64_t length) const = 0;
+
+  /// \brief Slice from first row at offset until end of the table
+  std::shared_ptr<Table> Slice(int64_t offset) const { return Slice(offset, num_rows_); }
 
   /// \brief Return a column by name
   /// \param[in] name field name
   /// \return an Array or null if no field was found
-  std::shared_ptr<Column> GetColumnByName(const std::string& name) const {
+  std::shared_ptr<ChunkedArray> GetColumnByName(const std::string& name) const {
     auto i = schema_->GetFieldIndex(name);
     return i == -1 ? NULLPTR : column(i);
   }
@@ -260,12 +220,21 @@ class ARROW_EXPORT Table {
   virtual Status RemoveColumn(int i, std::shared_ptr<Table>* out) const = 0;
 
   /// \brief Add column to the table, producing a new Table
-  virtual Status AddColumn(int i, const std::shared_ptr<Column>& column,
+  virtual Status AddColumn(int i, std::shared_ptr<Field> field_arg,
+                           std::shared_ptr<ChunkedArray> column,
                            std::shared_ptr<Table>* out) const = 0;
 
   /// \brief Replace a column in the table, producing a new Table
-  virtual Status SetColumn(int i, const std::shared_ptr<Column>& column,
+  virtual Status SetColumn(int i, std::shared_ptr<Field> field_arg,
+                           std::shared_ptr<ChunkedArray> column,
                            std::shared_ptr<Table>* out) const = 0;
+
+  /// \brief Return names of all columns
+  std::vector<std::string> ColumnNames() const;
+
+  /// \brief Rename columns with provided names
+  Status RenameColumns(const std::vector<std::string>& names,
+                       std::shared_ptr<Table>* out) const;
 
   /// \brief Replace schema key-value metadata with new metadata (EXPERIMENTAL)
   /// \since 0.5.0
@@ -282,8 +251,23 @@ class ARROW_EXPORT Table {
   /// \param[out] out The returned table
   virtual Status Flatten(MemoryPool* pool, std::shared_ptr<Table>* out) const = 0;
 
-  /// \brief Perform any checks to validate the input arguments
+  /// \brief Perform cheap validation checks to determine obvious inconsistencies
+  /// within the table's schema and internal data.
+  ///
+  /// This is O(k*m) where k is the total number of field descendents,
+  /// and m is the number of chunks.
+  ///
+  /// \return Status
   virtual Status Validate() const = 0;
+
+  /// \brief Perform extensive validation checks to determine inconsistencies
+  /// within the table's schema and internal data.
+  ///
+  /// This is O(k*n) where k is the total number of field descendents,
+  /// and n is the number of rows.
+  ///
+  /// \return Status
+  virtual Status ValidateFull() const = 0;
 
   /// \brief Return the number of columns in the table
   int num_columns() const { return schema_->num_fields(); }
@@ -296,6 +280,15 @@ class ARROW_EXPORT Table {
   /// Two tables can be equal only if they have equal schemas.
   /// However, they may be equal even if they have different chunkings.
   bool Equals(const Table& other) const;
+
+  /// \brief Make a new table by combining the chunks this table has.
+  ///
+  /// All the underlying chunks in the ChunkedArray of each column are
+  /// concatenated into zero or one chunk.
+  ///
+  /// \param[in] pool The pool for buffer allocations
+  /// \param[out] out The table with chunks combined
+  Status CombineChunks(MemoryPool* pool, std::shared_ptr<Table>* out) const;
 
  protected:
   Table();
@@ -313,8 +306,6 @@ class ARROW_EXPORT Table {
 /// of the table's columns.
 class ARROW_EXPORT TableBatchReader : public RecordBatchReader {
  public:
-  ~TableBatchReader() override;
-
   /// \brief Construct a TableBatchReader for the given table
   explicit TableBatchReader(const Table& table);
 
@@ -329,8 +320,12 @@ class ARROW_EXPORT TableBatchReader : public RecordBatchReader {
   void set_chunksize(int64_t chunksize);
 
  private:
-  class TableBatchReaderImpl;
-  std::unique_ptr<TableBatchReaderImpl> impl_;
+  const Table& table_;
+  std::vector<ChunkedArray*> column_data_;
+  std::vector<int> chunk_numbers_;
+  std::vector<int64_t> chunk_offsets_;
+  int64_t absolute_row_position_;
+  int64_t max_chunksize_;
 };
 
 /// \brief Construct table from multiple input tables.
@@ -341,6 +336,45 @@ class ARROW_EXPORT TableBatchReader : public RecordBatchReader {
 ARROW_EXPORT
 Status ConcatenateTables(const std::vector<std::shared_ptr<Table>>& tables,
                          std::shared_ptr<Table>* table);
+
+/// \brief Promotes a table to conform to the given schema.
+///
+/// If a field in the schema does not have a corresponding column in the
+/// table, a column of nulls will be added to the resulting table.
+/// If the corresponding column is of type Null, it will be promoted to
+/// the type specified by schema, with null values filled.
+/// Returns an error:
+/// - if the corresponding column's type is not compatible with the
+///   schema.
+/// - if there is a column in the table that does not exist in the schema.
+///
+/// \param[in] table the input Table
+/// \param[in] schema the target schema to promote to
+/// \param[in] pool The memory pool to be used if null-filled arrays need to
+/// be created.
+ARROW_EXPORT
+Result<std::shared_ptr<Table>> PromoteTableToSchema(
+    const std::shared_ptr<Table>& table, const std::shared_ptr<Schema>& schema,
+    MemoryPool* pool = default_memory_pool());
+
+/// \brief Concatenate tables with null-filling and type promotion.
+///
+/// Columns of the same name will be concatenated. They should be of the
+/// same type, or be of type NULL, in which case it will be promoted to
+/// the type of other corresponding columns with null values filled.
+/// If a table is missing a particular field, null values of the appropriate
+//  type will be generated to take the place of the missing field
+/// The new schema will share the metadata with the first table. Each field in
+/// the new schema will share the metadata with the first table which has the
+/// field defined.
+///
+/// \param[in] tables the tables to be concatenated
+/// \param[in] pool The memory pool to be used if null-filled arrays need to
+/// be created.
+ARROW_EXPORT
+Result<std::shared_ptr<Table>> ConcatenateTablesWithPromotion(
+    const std::vector<std::shared_ptr<Table>>& tables,
+    MemoryPool* pool = default_memory_pool());
 
 }  // namespace arrow
 

@@ -17,6 +17,8 @@
 
 package org.apache.arrow.vector;
 
+import static org.apache.arrow.vector.NullCheckingForGet.NULL_CHECKING_ENABLED;
+
 import java.math.BigDecimal;
 
 import org.apache.arrow.memory.BufferAllocator;
@@ -26,18 +28,20 @@ import org.apache.arrow.vector.holders.DecimalHolder;
 import org.apache.arrow.vector.holders.NullableDecimalHolder;
 import org.apache.arrow.vector.types.Types.MinorType;
 import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.util.DecimalUtility;
 import org.apache.arrow.vector.util.TransferPair;
 
 import io.netty.buffer.ArrowBuf;
+import io.netty.util.internal.PlatformDependent;
 
 /**
  * DecimalVector implements a fixed width vector (16 bytes) of
  * decimal values which could be null. A validity buffer (bit vector) is
  * maintained to track which elements in the vector are null.
  */
-public class DecimalVector extends BaseFixedWidthVector {
+public final class DecimalVector extends BaseFixedWidthVector {
   public static final byte TYPE_WIDTH = 16;
   private final FieldReader reader;
 
@@ -66,8 +70,19 @@ public class DecimalVector extends BaseFixedWidthVector {
    * @param allocator allocator for memory management.
    */
   public DecimalVector(String name, FieldType fieldType, BufferAllocator allocator) {
-    super(name, allocator, fieldType, TYPE_WIDTH);
-    ArrowType.Decimal arrowType = (ArrowType.Decimal) fieldType.getType();
+    this(new Field(name, fieldType, null), allocator);
+  }
+
+  /**
+   * Instantiate a DecimalVector. This doesn't allocate any memory for
+   * the data in vector.
+   *
+   * @param field field materialized by this vector
+   * @param allocator allocator for memory management.
+   */
+  public DecimalVector(Field field, BufferAllocator allocator) {
+    super(field, allocator, TYPE_WIDTH);
+    ArrowType.Decimal arrowType = (ArrowType.Decimal) field.getFieldType().getType();
     reader = new DecimalReaderImpl(DecimalVector.this);
     this.precision = arrowType.getPrecision();
     this.scale = arrowType.getScale();
@@ -109,7 +124,7 @@ public class DecimalVector extends BaseFixedWidthVector {
    * @return element at given index
    */
   public ArrowBuf get(int index) throws IllegalStateException {
-    if (isSet(index) == 0) {
+    if (NULL_CHECKING_ENABLED && isSet(index) == 0) {
       throw new IllegalStateException("Value at index is null");
     }
     return valueBuffer.slice(index * TYPE_WIDTH, TYPE_WIDTH);
@@ -149,34 +164,6 @@ public class DecimalVector extends BaseFixedWidthVector {
   }
 
   /**
-   * Copy a cell value from a particular index in source vector to a particular
-   * position in this vector.
-   *
-   * @param fromIndex position to copy from in source vector
-   * @param thisIndex position to copy to in this vector
-   * @param from source vector
-   */
-  public void copyFrom(int fromIndex, int thisIndex, DecimalVector from) {
-    BitVectorHelper.setValidityBit(validityBuffer, thisIndex, from.isSet(fromIndex));
-    from.valueBuffer.getBytes(fromIndex * TYPE_WIDTH, valueBuffer,
-            thisIndex * TYPE_WIDTH, TYPE_WIDTH);
-  }
-
-  /**
-   * Same as {@link #copyFrom(int, int, DecimalVector)} except that
-   * it handles the case when the capacity of the vector needs to be expanded
-   * before copy.
-   *
-   * @param fromIndex position to copy from in source vector
-   * @param thisIndex position to copy to in this vector
-   * @param from source vector
-   */
-  public void copyFromSafe(int fromIndex, int thisIndex, DecimalVector from) {
-    handleSafe(thisIndex);
-    copyFrom(fromIndex, thisIndex, from);
-  }
-
-  /**
    * Return scale for the decimal value.
    */
   public int getScale() {
@@ -198,7 +185,7 @@ public class DecimalVector extends BaseFixedWidthVector {
    * @param buffer   ArrowBuf containing decimal value.
    */
   public void set(int index, ArrowBuf buffer) {
-    BitVectorHelper.setValidityBitToOne(validityBuffer, index);
+    BitVectorHelper.setBit(validityBuffer, index);
     valueBuffer.setBytes(index * TYPE_WIDTH, buffer, 0, TYPE_WIDTH);
   }
 
@@ -218,43 +205,32 @@ public class DecimalVector extends BaseFixedWidthVector {
    * @param value array of bytes containing decimal in big endian byte order.
    */
   public void setBigEndian(int index, byte[] value) {
-    BitVectorHelper.setValidityBitToOne(validityBuffer, index);
+    BitVectorHelper.setBit(validityBuffer, index);
     final int length = value.length;
-    int startIndex = index * TYPE_WIDTH;
-    if (length == TYPE_WIDTH) {
-      for (int i = TYPE_WIDTH - 1; i >= 3; i -= 4) {
-        valueBuffer.setByte(startIndex, value[i]);
-        valueBuffer.setByte(startIndex + 1, value[i - 1]);
-        valueBuffer.setByte(startIndex + 2, value[i - 2]);
-        valueBuffer.setByte(startIndex + 3, value[i - 3]);
-        startIndex += 4;
-      }
 
+    // do the bound check.
+    valueBuffer.checkBytes(index * TYPE_WIDTH, (index + 1) * TYPE_WIDTH);
+
+    long outAddress = valueBuffer.memoryAddress() + index * TYPE_WIDTH;
+    // swap bytes to convert BE to LE
+    for (int byteIdx = 0; byteIdx < length; ++byteIdx) {
+      PlatformDependent.putByte(outAddress + byteIdx, value[length - 1 - byteIdx]);
+    }
+
+    if (length == TYPE_WIDTH) {
       return;
     }
 
     if (length == 0) {
-      valueBuffer.setZero(startIndex, TYPE_WIDTH);
-      return;
-    }
-
-    if (length < 16) {
-      for (int i = length - 1; i >= 0; i--) {
-        valueBuffer.setByte(startIndex, value[i]);
-        startIndex++;
-      }
-
+      PlatformDependent.setMemory(outAddress, DecimalVector.TYPE_WIDTH, (byte)0);
+    } else if (length < TYPE_WIDTH) {
+      // sign extend
       final byte pad = (byte) (value[0] < 0 ? 0xFF : 0x00);
-      final int maxStartIndex = (index + 1) * TYPE_WIDTH;
-      while (startIndex < maxStartIndex) {
-        valueBuffer.setByte(startIndex, pad);
-        startIndex++;
-      }
-
-      return;
+      PlatformDependent.setMemory(outAddress + length, DecimalVector.TYPE_WIDTH - length, pad);
+    } else {
+      throw new IllegalArgumentException(
+          "Invalid decimal value length. Valid length in [1 - 16], got " + length);
     }
-
-    throw new IllegalArgumentException("Invalid decimal value length. Valid length in [1 - 16], got " + length);
   }
 
   /**
@@ -265,8 +241,66 @@ public class DecimalVector extends BaseFixedWidthVector {
    * @param buffer   ArrowBuf containing decimal value.
    */
   public void set(int index, int start, ArrowBuf buffer) {
-    BitVectorHelper.setValidityBitToOne(validityBuffer, index);
+    BitVectorHelper.setBit(validityBuffer, index);
     valueBuffer.setBytes(index * TYPE_WIDTH, buffer, start, TYPE_WIDTH);
+  }
+
+  /**
+   * Sets the element at given index using the buffer whose size maybe <= 16 bytes.
+   * @param index index to write the decimal to
+   * @param start start of value in the buffer
+   * @param buffer contains the decimal in little endian bytes
+   * @param length length of the value in the buffer
+   */
+  public void setSafe(int index, int start, ArrowBuf buffer, int length) {
+    handleSafe(index);
+    BitVectorHelper.setBit(validityBuffer, index);
+
+    // do the bound checks.
+    buffer.checkBytes(start, start + length);
+    valueBuffer.checkBytes(index * TYPE_WIDTH, (index + 1) * TYPE_WIDTH);
+
+    long inAddress = buffer.memoryAddress() + start;
+    long outAddress = valueBuffer.memoryAddress() + index * TYPE_WIDTH;
+    PlatformDependent.copyMemory(inAddress, outAddress, length);
+    // sign extend
+    if (length < 16) {
+      byte msb = PlatformDependent.getByte(inAddress + length - 1);
+      final byte pad = (byte) (msb < 0 ? 0xFF : 0x00);
+      PlatformDependent.setMemory(outAddress + length, DecimalVector.TYPE_WIDTH - length, pad);
+    }
+  }
+
+
+  /**
+   * Sets the element at given index using the buffer whose size maybe <= 16 bytes.
+   * @param index index to write the decimal to
+   * @param start start of value in the buffer
+   * @param buffer contains the decimal in big endian bytes
+   * @param length length of the value in the buffer
+   */
+  public void setBigEndianSafe(int index, int start, ArrowBuf buffer, int length) {
+    handleSafe(index);
+    BitVectorHelper.setBit(validityBuffer, index);
+
+    // do the bound checks.
+    buffer.checkBytes(start, start + length);
+    valueBuffer.checkBytes(index * TYPE_WIDTH, (index + 1) * TYPE_WIDTH);
+
+    // not using buffer.getByte() to avoid boundary checks for every byte.
+    long inAddress = buffer.memoryAddress() + start;
+    long outAddress = valueBuffer.memoryAddress() + index * TYPE_WIDTH;
+    // swap bytes to convert BE to LE
+    for (int byteIdx = 0; byteIdx < length; ++byteIdx) {
+      byte val = PlatformDependent.getByte((inAddress + length - 1) - byteIdx);
+      PlatformDependent.putByte(outAddress + byteIdx, val);
+    }
+    // sign extend
+    if (length < 16) {
+      byte msb = PlatformDependent.getByte(inAddress);
+      final byte pad = (byte) (msb < 0 ? 0xFF : 0x00);
+      PlatformDependent.setMemory(outAddress + length, DecimalVector.TYPE_WIDTH - length, pad);
+    }
   }
 
   /**
@@ -276,9 +310,20 @@ public class DecimalVector extends BaseFixedWidthVector {
    * @param value   BigDecimal containing decimal value.
    */
   public void set(int index, BigDecimal value) {
-    BitVectorHelper.setValidityBitToOne(validityBuffer, index);
+    BitVectorHelper.setBit(validityBuffer, index);
     DecimalUtility.checkPrecisionAndScale(value, precision, scale);
     DecimalUtility.writeBigDecimalToArrowBuf(value, valueBuffer, index);
+  }
+
+  /**
+   * Set the element at the given index to the given value.
+   *
+   * @param index   position of element
+   * @param value   long value.
+   */
+  public void set(int index, long value) {
+    BitVectorHelper.setBit(validityBuffer, index);
+    DecimalUtility.writeLongToArrowBuf(value, valueBuffer, index);
   }
 
   /**
@@ -293,10 +338,10 @@ public class DecimalVector extends BaseFixedWidthVector {
     if (holder.isSet < 0) {
       throw new IllegalArgumentException();
     } else if (holder.isSet > 0) {
-      BitVectorHelper.setValidityBitToOne(validityBuffer, index);
+      BitVectorHelper.setBit(validityBuffer, index);
       valueBuffer.setBytes(index * TYPE_WIDTH, holder.buffer, holder.start, TYPE_WIDTH);
     } else {
-      BitVectorHelper.setValidityBit(validityBuffer, index, 0);
+      BitVectorHelper.unsetBit(validityBuffer, index);
     }
   }
 
@@ -307,7 +352,7 @@ public class DecimalVector extends BaseFixedWidthVector {
    * @param holder  data holder for value of element
    */
   public void set(int index, DecimalHolder holder) {
-    BitVectorHelper.setValidityBitToOne(validityBuffer, index);
+    BitVectorHelper.setBit(validityBuffer, index);
     valueBuffer.setBytes(index * TYPE_WIDTH, holder.buffer, holder.start, TYPE_WIDTH);
   }
 
@@ -362,6 +407,19 @@ public class DecimalVector extends BaseFixedWidthVector {
   }
 
   /**
+   * Same as {@link #set(int, long)} except that it handles the
+   * case when index is greater than or equal to existing
+   * value capacity {@link #getValueCapacity()}.
+   *
+   * @param index   position of element
+   * @param value   long value.
+   */
+  public void setSafe(int index, long value) {
+    handleSafe(index);
+    set(index, value);
+  }
+
+  /**
    * Same as {@link #set(int, NullableDecimalHolder)} except that it handles the
    * case when index is greater than or equal to existing
    * value capacity {@link #getValueCapacity()}.
@@ -388,18 +446,6 @@ public class DecimalVector extends BaseFixedWidthVector {
   }
 
   /**
-   * Set the element at the given index to null.
-   *
-   * @param index   position of element
-   */
-  public void setNull(int index) {
-    handleSafe(index);
-    // not really needed to set the bit to 0 as long as
-    // the buffer always starts from 0.
-    BitVectorHelper.setValidityBit(validityBuffer, index, 0);
-  }
-
-  /**
    * Store the given value at a particular position in the vector. isSet indicates
    * whether the value is NULL or not.
    *
@@ -412,7 +458,7 @@ public class DecimalVector extends BaseFixedWidthVector {
     if (isSet > 0) {
       set(index, start, buffer);
     } else {
-      BitVectorHelper.setValidityBit(validityBuffer, index, 0);
+      BitVectorHelper.unsetBit(validityBuffer, index);
     }
   }
 
@@ -431,7 +477,6 @@ public class DecimalVector extends BaseFixedWidthVector {
     set(index, isSet, start, buffer);
   }
 
-
   /*----------------------------------------------------------------*
    |                                                                |
    |                      vector transfer                           |
@@ -440,7 +485,7 @@ public class DecimalVector extends BaseFixedWidthVector {
 
 
   /**
-   * Construct a TransferPair comprising of this and and a target vector of
+   * Construct a TransferPair comprising of this and a target vector of
    * the same type.
    *
    * @param ref name of the target vector

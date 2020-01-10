@@ -38,15 +38,17 @@ files into Arrow structures.
    data
    ipc
    filesystems
+   filesystems_deprecated
    plasma
    numpy
    pandas
    timestamps
    csv
+   json
    parquet
    cuda
+   extending_types
    extending
    api
-   development
    getting_involved
    benchmarks

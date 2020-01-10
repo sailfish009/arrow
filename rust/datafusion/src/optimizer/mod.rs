@@ -15,5 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+//! This module contains a query optimizer that operates against a logical plan and applies
+//! some simple rules to a logical plan, such as "Projection Push Down" and "Type Coercion".
+
 pub mod optimizer;
 pub mod projection_push_down;
+pub mod type_coercion;
+pub mod utils;

@@ -29,7 +29,7 @@
 
 ## Prerequisites
 
-Before running tests and examples it is necessary to set up the local development enviroment.
+Before running tests and examples it is necessary to set up the local development environment.
 
 ### Git Submodules
 
@@ -46,8 +46,14 @@ This populates data in two git submodules:
 - `cpp/submodules/parquet_testing/data` (sourced from https://github.com/apache/parquet-testing.git)
 - `testing` (sourced from https://github.com/apache/arrow-testing)
 
-Create a new environment variable called `PARQUET_TEST_DATA` to point
-to `cpp/submodules/parquet-testing/data` and then `cargo test` as usual.
+Create two new environment variables to point to these directories as follows:
+
+```bash
+export PARQUET_TEST_DATA=/path/to/arrow/cpp/submodules/parquet-testing/data
+export ARROW_TEST_DATA=/path/to/arrow/testing/data/
+```
+
+It is now possible to run `cargo test` as usual.
 
 ## Code Formatting
 
@@ -58,4 +64,20 @@ and check for lint issues:
 
 ```bash
 cargo +stable fmt --all -- --check
+```
+
+## CI and Dockerized builds
+
+There are currently multiple CI systems that build the project and they all use the same docker image. It is possible to run the same build locally.
+
+From the root of the Arrow project, run the following command to build the Docker image that the CI system uses to build the project.
+
+```bash
+docker-compose build debian-rust
+```
+
+Run the following command to build the project in the same way that the CI system will build the project. Note that this currently does cause some files to be written to your local workspace.
+
+```bash
+docker-compose run --rm debian-rust bash
 ```

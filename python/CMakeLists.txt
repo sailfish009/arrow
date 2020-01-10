@@ -60,6 +60,7 @@ endif()
 if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
   option(PYARROW_BUILD_CUDA "Build the PyArrow CUDA support" OFF)
   option(PYARROW_BUILD_FLIGHT "Build the PyArrow Flight integration" OFF)
+  option(PYARROW_BUILD_DATASET "Build the PyArrow Dataset integration" OFF)
   option(PYARROW_BUILD_GANDIVA "Build the PyArrow Gandiva integration" OFF)
   option(PYARROW_BUILD_PARQUET "Build the PyArrow Parquet integration" OFF)
   option(PYARROW_PARQUET_USE_SHARED "Rely on parquet shared libraries where relevant" ON)
@@ -85,7 +86,6 @@ endif(CCACHE_FOUND)
 #
 
 include(BuildUtils)
-include(CompilerInfo)
 
 # Cython generated code emits way to many warnings at CHECKIN and EVERYTHING
 set(BUILD_WARNING_LEVEL "PRODUCTION")
@@ -96,13 +96,7 @@ include(SetupCxxFlags)
 set(CMAKE_CXX_FLAGS "${CXX_COMMON_FLAGS} ${CMAKE_CXX_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${PYARROW_CXXFLAGS}")
 
-if(NOT MSVC)
-  # Enable perf and other tools to work properly
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-omit-frame-pointer")
-
-  # Suppress Cython warnings
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable -Wno-maybe-uninitialized")
-else()
+if(MSVC)
   # MSVC version of -Wno-return-type-c-linkage
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4190")
 
@@ -117,18 +111,25 @@ else()
   # See https://github.com/cython/cython/issues/2731. Change introduced in
   # Cython 0.29.1 causes "unsafe use of type 'bool' in operation"
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4804")
-endif()
+else()
+  # Enable perf and other tools to work properly
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-omit-frame-pointer")
 
-if("${COMPILER_FAMILY}" STREQUAL "clang")
-  # Cython warnings in clang
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-parentheses-equality")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-constant-logical-operand")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-missing-declarations")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-sometimes-uninitialized")
+  # Suppress Cython warnings
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable -Wno-maybe-uninitialized")
 
-  # We have public Cython APIs which return C++ types, which are in an extern
-  # "C" blog (no symbol mangling) and clang doesn't like this
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-return-type-c-linkage")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"
+     OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # Cython warnings in clang
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-parentheses-equality")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-constant-logical-operand")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-missing-declarations")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-sometimes-uninitialized")
+
+    # We have public Cython APIs which return C++ types, which are in an extern
+    # "C" blog (no symbol mangling) and clang doesn't like this
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-return-type-c-linkage")
+  endif()
 endif()
 
 # For any C code, use the same flags.
@@ -157,7 +158,10 @@ if(${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR})
   if(NOT APPLE)
     set(MORE_ARGS "-T")
   endif()
-  execute_process(COMMAND ln ${MORE_ARGS} -sf ${BUILD_OUTPUT_ROOT_DIRECTORY}
+  execute_process(COMMAND ln
+                          ${MORE_ARGS}
+                          -sf
+                          ${BUILD_OUTPUT_ROOT_DIRECTORY}
                           ${CMAKE_CURRENT_BINARY_DIR}/build/latest)
 else()
   set(BUILD_OUTPUT_ROOT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${BUILD_SUBDIR_NAME}")
@@ -197,12 +201,12 @@ if(PYARROW_BUILD_FLIGHT)
 endif()
 
 # Arrow
-find_package(Arrow REQUIRED)
+find_package(ArrowPython REQUIRED)
 include_directories(SYSTEM ${ARROW_INCLUDE_DIR})
 
 function(bundle_arrow_lib library_path)
   set(options)
-  set(one_value_args ABI_VERSION SO_VERSION)
+  set(one_value_args SO_VERSION)
   set(multi_value_args)
   cmake_parse_arguments(ARG
                         "${options}"
@@ -221,18 +225,10 @@ function(bundle_arrow_lib library_path)
 
   if(APPLE)
     configure_file(
-      ${LIBRARY_DIR}/${LIBRARY_NAME}.${ARG_ABI_VERSION}${CMAKE_SHARED_LIBRARY_SUFFIX}
-      ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME}.${ARG_ABI_VERSION}${CMAKE_SHARED_LIBRARY_SUFFIX}
-      COPYONLY)
-    configure_file(
       ${LIBRARY_DIR}/${LIBRARY_NAME}.${ARG_SO_VERSION}${CMAKE_SHARED_LIBRARY_SUFFIX}
       ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME}.${ARG_SO_VERSION}${CMAKE_SHARED_LIBRARY_SUFFIX}
       COPYONLY)
   elseif(NOT MSVC)
-    configure_file(
-      ${${library_path}}.${ARG_ABI_VERSION}
-      ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}.${ARG_ABI_VERSION}
-      COPYONLY)
     configure_file(
       ${${library_path}}.${ARG_SO_VERSION}
       ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}.${ARG_SO_VERSION}
@@ -241,12 +237,12 @@ function(bundle_arrow_lib library_path)
 
 endfunction(bundle_arrow_lib)
 
-function(bundle_arrow_implib library_path)
+function(bundle_arrow_import_lib library_path)
   get_filename_component(LIBRARY_DIR ${${library_path}} DIRECTORY)
   get_filename_component(LIBRARY_NAME ${${library_path}} NAME_WE)
   configure_file(${${library_path}} ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME}.lib
                  COPYONLY)
-endfunction(bundle_arrow_implib)
+endfunction(bundle_arrow_import_lib)
 
 function(bundle_boost_lib library_path)
   get_filename_component(LIBRARY_NAME ${${library_path}} NAME)
@@ -258,7 +254,7 @@ function(bundle_boost_lib library_path)
   if(APPLE)
     configure_file(
       ${${library_path}}
-      ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME_WE}.${Boost_SO_VERSION}${CMAKE_SHARED_LIBRARY_SUFFIX}
+      ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME_WE}${CMAKE_SHARED_LIBRARY_SUFFIX}
       COPYONLY)
   else()
     configure_file(
@@ -268,31 +264,51 @@ function(bundle_boost_lib library_path)
   endif()
 endfunction()
 
-function(bundle_zlib)
-  # We can assume that manylinux1 and macosx have system zlib.
-  # See https://mail.python.org/mm3/archives/list/distutils-sig@python.org/thread/ZZG6GL3XTBLBJXSITYHEXMFKN43EREB7/
-  # for manylinux1.
+function(bundle_arrow_dependency library_name)
   if(MSVC)
-    # zlib uses zlib.dll for Windows
-    set(ZLIB_SHARED_LIB_NAME zlib.dll)
-    if(DEFINED ENV{ARROW_BUILD_TOOLCHAIN})
-      set(ZLIB_HOME "$ENV{ARROW_BUILD_TOOLCHAIN}")
+    if(DEFINED ENV{CONDA_PREFIX})
+      file(TO_CMAKE_PATH "$ENV{CONDA_PREFIX}\\Library" SHARED_LIB_HOME)
     endif()
-    if(DEFINED ENV{ZLIB_HOME})
-      set(ZLIB_HOME "$ENV{ZLIB_HOME}")
+  else()
+    if(DEFINED ENV{CONDA_PREFIX})
+      file(TO_CMAKE_PATH "$ENV{CONDA_PREFIX}" SHARED_LIB_HOME)
     endif()
-    if("${ZLIB_HOME}" STREQUAL "")
-      find_library(ZLIB_SHARED_LIB NAMES ${ZLIB_SHARED_LIB_NAME})
-    else()
-      find_library(ZLIB_SHARED_LIB
-                   NAMES ${ZLIB_SHARED_LIB_NAME}
-                   PATHS ${ZLIB_HOME}
-                   NO_DEFAULT_PATH
-                   PATH_SUFFIXES "bin")
-    endif()
-    if(ZLIB_SHARED_LIB)
-      file(COPY ${ZLIB_SHARED_LIB} DESTINATION ${BUILD_OUTPUT_ROOT_DIRECTORY})
-    endif()
+  endif()
+  if(DEFINED ENV{${library_name}_HOME})
+    file(TO_CMAKE_PATH "$ENV{${library_name}_HOME}" SHARED_LIB_HOME)
+  endif()
+  arrow_build_shared_library_name(shared_lib_name "${library_name}")
+  unset(SHARED_LIB_PATH CACHE)
+  if(MSVC)
+    set(CMAKE_SHARED_LIBRARY_SUFFIXES_ORIGINAL ${CMAKE_FIND_LIBRARY_SUFFIXES})
+    # .dll isn't found by find_library with MSVC because .dll isn't included in
+    # CMAKE_FIND_LIBRARY_SUFFIXES.
+    list(APPEND CMAKE_FIND_LIBRARY_SUFFIXES "${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  endif()
+  if(SHARED_LIB_HOME)
+    find_library(SHARED_LIB_PATH
+                 NAMES "${shared_lib_name}"
+                 PATHS "${SHARED_LIB_HOME}"
+                 PATH_SUFFIXES ${ARROW_SEARCH_LIB_PATH_SUFFIXES}
+                 NO_DEFAULT_PATH)
+  else()
+    find_library(SHARED_LIB_PATH
+                 NAMES "${shared_lib_name}"
+                 PATH_SUFFIXES ${ARROW_SEARCH_LIB_PATH_SUFFIXES})
+  endif()
+  if(MSVC)
+    set(CMAKE_SHARED_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES_ORIGINAL})
+  endif()
+  if(SHARED_LIB_PATH)
+    get_filename_component(SHARED_LIB_REALPATH ${SHARED_LIB_PATH} REALPATH)
+    get_filename_component(SHARED_LIB_NAME ${SHARED_LIB_PATH} NAME)
+    message(
+      STATUS
+        "Bundle dependency ${library_name}: ${SHARED_LIB_REALPATH} as ${SHARED_LIB_NAME}")
+    configure_file(${SHARED_LIB_REALPATH}
+                   ${BUILD_OUTPUT_ROOT_DIRECTORY}/${SHARED_LIB_NAME} COPYONLY)
+  else()
+    message(FATAL_ERROR "Unable to bundle dependency: ${library_name}")
   endif()
 endfunction()
 
@@ -301,16 +317,8 @@ file(COPY ${ARROW_INCLUDE_DIR}/arrow DESTINATION ${BUILD_OUTPUT_ROOT_DIRECTORY}/
 
 if(PYARROW_BUNDLE_ARROW_CPP)
   # arrow
-  bundle_arrow_lib(ARROW_SHARED_LIB
-                   ABI_VERSION
-                   ${ARROW_ABI_VERSION}
-                   SO_VERSION
-                   ${ARROW_SO_VERSION})
-  bundle_arrow_lib(ARROW_PYTHON_SHARED_LIB
-                   ABI_VERSION
-                   ${ARROW_ABI_VERSION}
-                   SO_VERSION
-                   ${ARROW_SO_VERSION})
+  bundle_arrow_lib(ARROW_SHARED_LIB SO_VERSION ${ARROW_SO_VERSION})
+  bundle_arrow_lib(ARROW_PYTHON_SHARED_LIB SO_VERSION ${ARROW_SO_VERSION})
 
   # boost
   if(PYARROW_BOOST_USE_SHARED AND PYARROW_BUNDLE_BOOST)
@@ -346,25 +354,11 @@ if(PYARROW_BUNDLE_ARROW_CPP)
     bundle_boost_lib(Boost_SYSTEM_LIBRARY)
   endif()
 
-  bundle_zlib()
-
   if(MSVC)
-    bundle_arrow_implib(ARROW_SHARED_IMP_LIB)
-    bundle_arrow_implib(ARROW_PYTHON_SHARED_IMP_LIB)
-  endif()
-endif()
-
-if(MSVC)
-  add_thirdparty_lib(arrow SHARED_LIB ${ARROW_SHARED_IMP_LIB})
-  add_thirdparty_lib(arrow_python SHARED_LIB ${ARROW_PYTHON_SHARED_IMP_LIB})
-  if(PYARROW_BUILD_FLIGHT)
-    add_thirdparty_lib(arrow_flight SHARED_LIB ${ARROW_FLIGHT_SHARED_IMP_LIB})
-  endif()
-else()
-  add_thirdparty_lib(arrow SHARED_LIB ${ARROW_SHARED_LIB})
-  add_thirdparty_lib(arrow_python SHARED_LIB ${ARROW_PYTHON_SHARED_LIB})
-  if(PYARROW_BUILD_FLIGHT)
-    add_thirdparty_lib(arrow_flight SHARED_LIB ${ARROW_FLIGHT_SHARED_LIB})
+    find_package(ZLIB)
+    bundle_arrow_import_lib(ARROW_IMPORT_LIB)
+    bundle_arrow_import_lib(ARROW_PYTHON_IMPORT_LIB)
+    bundle_arrow_dependency(zlib)
   endif()
 endif()
 
@@ -376,67 +370,67 @@ if(UNIX)
   set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 endif()
 
-set(CYTHON_EXTENSIONS lib _csv)
+set(CYTHON_EXTENSIONS lib _fs _csv _json)
 
 set(LINK_LIBS arrow_shared arrow_python_shared)
 
+if(PYARROW_BUILD_S3)
+  set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} _s3fs)
+endif()
+
+if(PYARROW_BUILD_HDFS)
+  set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} _hdfs)
+endif()
+
 if(PYARROW_BUILD_CUDA)
   # Arrow CUDA
-  find_package(ArrowCuda)
-  if(NOT ARROW_CUDA_FOUND)
-    message(FATAL_ERROR "Unable to locate Arrow CUDA libraries")
-  else()
-    if(PYARROW_BUNDLE_ARROW_CPP)
-      bundle_arrow_lib(ARROW_CUDA_SHARED_LIB
-                       ABI_VERSION
-                       ${ARROW_ABI_VERSION}
-                       SO_VERSION
-                       ${ARROW_SO_VERSION})
-      if(MSVC)
-        bundle_arrow_implib(ARROW_CUDA_SHARED_IMP_LIB)
-      endif()
-    endif()
+  find_package(ArrowCUDA REQUIRED)
+
+  if(PYARROW_BUNDLE_ARROW_CPP)
+    bundle_arrow_lib(ARROW_CUDA_SHARED_LIB SO_VERSION ${ARROW_SO_VERSION})
     if(MSVC)
-      add_thirdparty_lib(arrow_cuda SHARED_LIB ${ARROW_CUDA_SHARED_IMP_LIB})
-    else()
-      add_thirdparty_lib(arrow_cuda SHARED_LIB ${ARROW_CUDA_SHARED_LIB})
+      bundle_arrow_import_lib(ARROW_CUDA_IMPORT_LIB)
     endif()
-    set(LINK_LIBS ${LINK_LIBS} arrow_cuda_shared)
-    set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} _cuda)
   endif()
+  set(CUDA_LINK_LIBS arrow_cuda_shared)
+  set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} _cuda)
+endif()
+
+# Dataset
+if(PYARROW_BUILD_DATASET)
+  # Arrow Dataset
+  find_package(ArrowDataset REQUIRED)
+
+  if(PYARROW_BUNDLE_ARROW_CPP)
+    bundle_arrow_lib(ARROW_DATASET_SHARED_LIB SO_VERSION ${ARROW_SO_VERSION})
+    if(MSVC)
+      bundle_arrow_import_lib(ARROW_DATASET_IMPORT_LIB)
+    endif()
+  endif()
+
+  set(DATASET_LINK_LIBS arrow_dataset_shared)
+  set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} _dataset)
 endif()
 
 if(PYARROW_BUILD_PARQUET)
   # Parquet
-  find_package(Parquet)
+  find_package(Parquet REQUIRED)
 
-  if(NOT PARQUET_FOUND)
-    message(FATAL_ERROR "Unable to locate Parquet libraries")
-  endif()
   include_directories(SYSTEM ${PARQUET_INCLUDE_DIR})
 
   if(PYARROW_BUNDLE_ARROW_CPP)
-    file(COPY ${PARQUET_INCLUDE_DIR}/parquet DESTINATION
-         ${BUILD_OUTPUT_ROOT_DIRECTORY}/include)
+    file(COPY ${PARQUET_INCLUDE_DIR}/parquet
+         DESTINATION ${BUILD_OUTPUT_ROOT_DIRECTORY}/include)
   endif()
 
   if(PYARROW_PARQUET_USE_SHARED)
     if(PYARROW_BUNDLE_ARROW_CPP)
-      bundle_arrow_lib(PARQUET_SHARED_LIB
-                       ABI_VERSION
-                       ${PARQUET_ABI_VERSION}
-                       SO_VERSION
-                       ${PARQUET_SO_VERSION})
+      bundle_arrow_lib(PARQUET_SHARED_LIB SO_VERSION ${PARQUET_SO_VERSION})
       if(MSVC)
-        bundle_arrow_implib(PARQUET_SHARED_IMP_LIB)
+        bundle_arrow_import_lib(PARQUET_IMPORT_LIB)
       endif()
     endif()
-    if(MSVC)
-      add_thirdparty_lib(parquet SHARED_LIB ${PARQUET_SHARED_IMP_LIB})
-    else()
-      add_thirdparty_lib(parquet SHARED_LIB ${PARQUET_SHARED_LIB})
-    endif()
-    set(LINK_LIBS ${LINK_LIBS} parquet_shared)
+    set(PARQUET_LINK_LIBS parquet_shared)
   else()
     find_package(Thrift)
     if(PYARROW_BOOST_USE_SHARED)
@@ -446,38 +440,27 @@ if(PYARROW_BUILD_PARQUET)
     endif()
     find_package(Boost COMPONENTS regex REQUIRED)
     add_thirdparty_lib(boost_regex STATIC_LIB ${Boost_REGEX_LIBRARY_RELEASE})
-    add_thirdparty_lib(parquet STATIC_LIB ${PARQUET_STATIC_LIB})
     add_thirdparty_lib(thrift STATIC_LIB ${THRIFT_STATIC_LIB})
-    set(LINK_LIBS ${LINK_LIBS} parquet_static thrift_static boost_regex_static)
+    set(PARQUET_LINK_LIBS parquet_static thrift_static boost_regex_static)
   endif()
   set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} _parquet)
 endif()
 
 # Plasma
 if(PYARROW_BUILD_PLASMA)
-  find_package(Plasma)
-
-  if(NOT PLASMA_FOUND)
-    message(FATAL_ERROR "Unable to locate Plasma libraries")
-  endif()
+  find_package(Plasma REQUIRED)
 
   include_directories(SYSTEM ${PLASMA_INCLUDE_DIR})
-  add_thirdparty_lib(libplasma SHARED_LIB ${PLASMA_SHARED_LIB})
 
-  file(COPY ${ARROW_INCLUDE_DIR}/plasma DESTINATION
-       ${BUILD_OUTPUT_ROOT_DIRECTORY}/include)
+  file(COPY ${ARROW_INCLUDE_DIR}/plasma
+       DESTINATION ${BUILD_OUTPUT_ROOT_DIRECTORY}/include)
 
   if(PYARROW_BUNDLE_ARROW_CPP)
-    bundle_arrow_lib(PLASMA_SHARED_LIB
-                     ABI_VERSION
-                     ${ARROW_ABI_VERSION}
-                     SO_VERSION
-                     ${ARROW_SO_VERSION})
+    bundle_arrow_lib(PLASMA_SHARED_LIB SO_VERSION ${PLASMA_SO_VERSION})
   endif()
-  set(LINK_LIBS ${LINK_LIBS} libplasma_shared)
-
+  set(PLASMA_LINK_LIBS plasma_shared)
   set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} _plasma)
-  file(COPY ${PLASMA_EXECUTABLE} DESTINATION ${BUILD_OUTPUT_ROOT_DIRECTORY})
+  file(COPY ${PLASMA_STORE_SERVER} DESTINATION ${BUILD_OUTPUT_ROOT_DIRECTORY})
 endif()
 
 if(PYARROW_BUILD_ORC)
@@ -487,50 +470,47 @@ endif()
 
 # Flight
 if(PYARROW_BUILD_FLIGHT)
+  # Arrow Flight
+  find_package(ArrowPythonFlight REQUIRED)
+
   if(PYARROW_BUNDLE_ARROW_CPP)
-    # TODO:
-    message(FATAL_ERROR "Not yet implemented: bundling arrow-flight in pyarrow")
+    bundle_arrow_lib(ARROW_FLIGHT_SHARED_LIB SO_VERSION ${ARROW_SO_VERSION})
+    bundle_arrow_lib(ARROW_PYTHON_FLIGHT_SHARED_LIB SO_VERSION ${ARROW_SO_VERSION})
+    if(MSVC)
+      bundle_arrow_import_lib(ARROW_FLIGHT_IMPORT_LIB)
+      bundle_arrow_import_lib(ARROW_PYTHON_FLIGHT_IMPORT_LIB)
+      bundle_arrow_dependency(cares)
+      bundle_arrow_dependency(libprotobuf)
+      # XXX Hardcoded library names because CMake is too stupid to give us
+      # the shared library paths.
+      # https://gitlab.kitware.com/cmake/cmake/issues/16210
+      bundle_arrow_dependency(libcrypto-1_1-x64)
+      bundle_arrow_dependency(libssl-1_1-x64)
+    endif()
   endif()
-  # We do NOT want to link gRPC or any other Flight dependency
-  # here. Linking more than one copy leads to odd runtime errors due
-  # to multiple copies of static global state. Thus we also need to
-  # link Flight as a shared object.
-  set(LINK_LIBS ${LINK_LIBS} arrow_flight_shared)
+
+  set(FLIGHT_LINK_LIBS arrow_flight_shared arrow_python_flight_shared)
   set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} _flight)
 endif()
 
 # Gandiva
 if(PYARROW_BUILD_GANDIVA)
-  find_package(Gandiva)
-
-  if(NOT GANDIVA_FOUND)
-    message(FATAL_ERROR "Unable to locate Gandiva libraries")
-  endif()
+  find_package(Gandiva REQUIRED)
 
   include_directories(SYSTEM ${GANDIVA_INCLUDE_DIR})
 
   if(PYARROW_BUNDLE_ARROW_CPP)
-    file(COPY ${GANDIVA_INCLUDE_DIR}/gandiva DESTINATION
-         ${BUILD_OUTPUT_ROOT_DIRECTORY}/include)
+    file(COPY ${GANDIVA_INCLUDE_DIR}/gandiva
+         DESTINATION ${BUILD_OUTPUT_ROOT_DIRECTORY}/include)
 
-    bundle_arrow_lib(GANDIVA_SHARED_LIB
-                     ABI_VERSION
-                     ${ARROW_ABI_VERSION}
-                     SO_VERSION
-                     ${ARROW_SO_VERSION})
+    bundle_arrow_lib(GANDIVA_SHARED_LIB SO_VERSION ${ARROW_SO_VERSION})
 
     if(MSVC)
-      bundle_arrow_implib(GANDIVA_SHARED_IMP_LIB)
+      bundle_arrow_import_lib(GANDIVA_IMPORT_LIB)
     endif()
   endif()
 
-  if(MSVC)
-    add_thirdparty_lib(gandiva SHARED_LIB ${GANDIVA_SHARED_IMP_LIB})
-  else()
-    add_thirdparty_lib(gandiva SHARED_LIB ${GANDIVA_SHARED_LIB})
-  endif()
-
-  set(LINK_LIBS ${LINK_LIBS} gandiva_shared)
+  set(GANDIVA_LINK_LIBS gandiva_shared)
   set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} gandiva)
 endif()
 
@@ -593,3 +573,29 @@ foreach(module ${CYTHON_EXTENSIONS})
 
   # Generated files will be moved to the right directory by setup.py.
 endforeach(module)
+
+# Additional link libraries
+
+if(PYARROW_BUILD_CUDA)
+  target_link_libraries(_cuda ${CUDA_LINK_LIBS})
+endif()
+
+if(PYARROW_BUILD_FLIGHT)
+  target_link_libraries(_flight ${FLIGHT_LINK_LIBS})
+endif()
+
+if(PYARROW_BUILD_DATASET)
+  target_link_libraries(_dataset ${DATASET_LINK_LIBS})
+endif()
+
+if(PYARROW_BUILD_GANDIVA)
+  target_link_libraries(gandiva ${GANDIVA_LINK_LIBS})
+endif()
+
+if(PYARROW_BUILD_PARQUET)
+  target_link_libraries(_parquet ${PARQUET_LINK_LIBS})
+endif()
+
+if(PYARROW_BUILD_PLASMA)
+  target_link_libraries(_plasma ${PLASMA_LINK_LIBS})
+endif()

@@ -19,6 +19,10 @@ if(CMAKE_VERSION VERSION_LESS 3.11)
   message(FATAL_ERROR "Building the Gandiva JNI bindings requires CMake version >= 3.11")
 endif()
 
+if(MSVC)
+  add_definitions(-DPROTOBUF_USE_DLLS)
+endif()
+
 # Find JNI
 find_package(JNI REQUIRED)
 
@@ -32,11 +36,13 @@ get_filename_component(ABS_GANDIVA_PROTO ${CMAKE_SOURCE_DIR}/src/gandiva/proto/T
                        ABSOLUTE)
 
 add_custom_command(OUTPUT ${PROTO_OUTPUT_FILES}
-                   COMMAND ${PROTOBUF_EXECUTABLE}
-                           --proto_path ${CMAKE_SOURCE_DIR}/src/gandiva/proto
-                           --cpp_out ${PROTO_OUTPUT_DIR}
-                                     ${CMAKE_SOURCE_DIR}/src/gandiva/proto/Types.proto
-                   DEPENDS ${ABS_GANDIVA_PROTO} ${PROTOBUF_LIBRARY}
+                   COMMAND ${ARROW_PROTOBUF_PROTOC}
+                           --proto_path
+                           ${CMAKE_SOURCE_DIR}/src/gandiva/proto
+                           --cpp_out
+                           ${PROTO_OUTPUT_DIR}
+                           ${CMAKE_SOURCE_DIR}/src/gandiva/proto/Types.proto
+                   DEPENDS ${ABS_GANDIVA_PROTO} ${ARROW_PROTOBUF_LIBPROTOBUF}
                    COMMENT "Running PROTO compiler on Types.proto"
                    VERBATIM)
 
@@ -48,7 +54,7 @@ set(PROTO_HDRS "${PROTO_OUTPUT_DIR}/Types.pb.h")
 set(JNI_HEADERS_DIR "${CMAKE_CURRENT_BINARY_DIR}/java")
 add_subdirectory(../../../../java/gandiva ./java/gandiva)
 
-set(GANDIVA_LINK_LIBS ${PROTOBUF_LIBRARY} gandiva_static)
+set(GANDIVA_LINK_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF} gandiva_static)
 
 set(GANDIVA_JNI_SOURCES
     config_builder.cc
@@ -74,10 +80,11 @@ add_arrow_lib(gandiva_jni
               DEPENDENCIES
               gandiva_java
               gandiva_jni_proto
+              gandiva_jni_headers
               EXTRA_INCLUDES
               $<INSTALL_INTERFACE:include>
               $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-              ${JNI_HEADERS_DIR}
+              $<BUILD_INTERFACE:${JNI_HEADERS_DIR}>
               PRIVATE_INCLUDES
               ${JNI_INCLUDE_DIRS}
               ${CMAKE_CURRENT_BINARY_DIR})

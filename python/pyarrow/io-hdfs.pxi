@@ -55,14 +55,14 @@ def strip_hdfs_abspath(path):
 
 cdef class HadoopFileSystem:
     cdef:
-        shared_ptr[CHadoopFileSystem] client
+        shared_ptr[CIOHadoopFileSystem] client
 
     cdef readonly:
         bint is_open
-        str host
-        str user
-        str kerb_ticket
-        str driver
+        object host
+        object user
+        object kerb_ticket
+        object driver
         int port
         dict extra_conf
 
@@ -102,7 +102,7 @@ cdef class HadoopFileSystem:
         self.extra_conf = extra_conf
 
         with nogil:
-            check_status(CHadoopFileSystem.Connect(&conf, &self.client))
+            check_status(CIOHadoopFileSystem.Connect(&conf, &self.client))
         self.is_open = True
 
     @classmethod
@@ -424,7 +424,7 @@ cdef class HadoopFileSystem:
                                   c_replication, c_default_block_size,
                                   &wr_handle))
 
-            out.set_output_stream(<shared_ptr[OutputStream]> wr_handle)
+            out.set_output_stream(<shared_ptr[COutputStream]> wr_handle)
             out.is_writable = True
         else:
             with nogil:
@@ -432,7 +432,7 @@ cdef class HadoopFileSystem:
                              .OpenReadable(c_path, &rd_handle))
 
             out.set_random_access_file(
-                <shared_ptr[RandomAccessFile]> rd_handle)
+                <shared_ptr[CRandomAccessFile]> rd_handle)
             out.is_readable = True
 
         assert not out.closed

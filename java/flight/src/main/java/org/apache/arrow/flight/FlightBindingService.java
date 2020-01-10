@@ -18,22 +18,24 @@
 package org.apache.arrow.flight;
 
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 
 import org.apache.arrow.flight.auth.ServerAuthHandler;
 import org.apache.arrow.flight.impl.Flight;
 import org.apache.arrow.flight.impl.Flight.PutResult;
+import org.apache.arrow.flight.impl.FlightServiceGrpc;
 import org.apache.arrow.memory.BufferAllocator;
 
 import com.google.common.collect.ImmutableSet;
 
 import io.grpc.BindableService;
 import io.grpc.MethodDescriptor;
+import io.grpc.MethodDescriptor.MethodType;
 import io.grpc.ServerMethodDefinition;
 import io.grpc.ServerServiceDefinition;
+import io.grpc.ServiceDescriptor;
 import io.grpc.protobuf.ProtoUtils;
 import io.grpc.stub.ServerCalls;
-import io.grpc.stub.ServerCalls.ClientStreamingMethod;
-import io.grpc.stub.ServerCalls.ServerStreamingMethod;
 import io.grpc.stub.StreamObserver;
 
 /**
@@ -49,9 +51,9 @@ class FlightBindingService implements BindableService {
   private final BufferAllocator allocator;
 
   public FlightBindingService(BufferAllocator allocator, FlightProducer producer,
-      ServerAuthHandler authHandler) {
+      ServerAuthHandler authHandler, ExecutorService executor) {
     this.allocator = allocator;
-    this.delegate = new FlightService(allocator, producer, authHandler);
+    this.delegate = new FlightService(allocator, producer, authHandler, executor);
   }
 
   public static MethodDescriptor<Flight.Ticket, ArrowMessage> getDoGetDescriptor(BufferAllocator allocator) {
@@ -61,16 +63,18 @@ class FlightBindingService implements BindableService {
         .setSampledToLocalTracing(false)
         .setRequestMarshaller(ProtoUtils.marshaller(Flight.Ticket.getDefaultInstance()))
         .setResponseMarshaller(ArrowMessage.createMarshaller(allocator))
+        .setSchemaDescriptor(FlightServiceGrpc.getDoGetMethod().getSchemaDescriptor())
         .build();
   }
 
   public static MethodDescriptor<ArrowMessage, Flight.PutResult> getDoPutDescriptor(BufferAllocator allocator) {
     return MethodDescriptor.<ArrowMessage, Flight.PutResult>newBuilder()
-        .setType(io.grpc.MethodDescriptor.MethodType.CLIENT_STREAMING)
+        .setType(MethodType.BIDI_STREAMING)
         .setFullMethodName(DO_PUT)
         .setSampledToLocalTracing(false)
         .setRequestMarshaller(ArrowMessage.createMarshaller(allocator))
         .setResponseMarshaller(ProtoUtils.marshaller(Flight.PutResult.getDefaultInstance()))
+        .setSchemaDescriptor(FlightServiceGrpc.getDoPutMethod().getSchemaDescriptor())
         .build();
   }
 
@@ -82,9 +86,23 @@ class FlightBindingService implements BindableService {
 
     final MethodDescriptor<ArrowMessage, Flight.PutResult> doPutDescriptor = getDoPutDescriptor(allocator);
 
-    ServerServiceDefinition.Builder serviceBuilder = ServerServiceDefinition.builder(FlightConstants.SERVICE);
+    // Make sure we preserve SchemaDescriptor fields on methods so that gRPC reflection still works.
+    final ServiceDescriptor.Builder serviceDescriptorBuilder = ServiceDescriptor.newBuilder(FlightConstants.SERVICE)
+        .setSchemaDescriptor(baseDefinition.getServiceDescriptor().getSchemaDescriptor());
+    serviceDescriptorBuilder.addMethod(doGetDescriptor);
+    serviceDescriptorBuilder.addMethod(doPutDescriptor);
+    for (MethodDescriptor<?, ?> definition : baseDefinition.getServiceDescriptor().getMethods()) {
+      if (OVERRIDE_METHODS.contains(definition.getFullMethodName())) {
+        continue;
+      }
+
+      serviceDescriptorBuilder.addMethod(definition);
+    }
+
+    final ServiceDescriptor serviceDescriptor = serviceDescriptorBuilder.build();
+    ServerServiceDefinition.Builder serviceBuilder = ServerServiceDefinition.builder(serviceDescriptor);
     serviceBuilder.addMethod(doGetDescriptor, ServerCalls.asyncServerStreamingCall(new DoGetMethod(delegate)));
-    serviceBuilder.addMethod(doPutDescriptor, ServerCalls.asyncClientStreamingCall(new DoPutMethod(delegate)));
+    serviceBuilder.addMethod(doPutDescriptor, ServerCalls.asyncBidiStreamingCall(new DoPutMethod(delegate)));
 
     // copy over not-overridden methods.
     for (ServerMethodDefinition<?, ?> definition : baseDefinition.getMethods()) {
@@ -98,7 +116,7 @@ class FlightBindingService implements BindableService {
     return serviceBuilder.build();
   }
 
-  private class DoGetMethod implements ServerStreamingMethod<Flight.Ticket, ArrowMessage> {
+  private class DoGetMethod implements ServerCalls.ServerStreamingMethod<Flight.Ticket, ArrowMessage> {
 
     private final FlightService delegate;
 
@@ -112,7 +130,7 @@ class FlightBindingService implements BindableService {
     }
   }
 
-  private class DoPutMethod implements ClientStreamingMethod<ArrowMessage, Flight.PutResult> {
+  private class DoPutMethod implements ServerCalls.BidiStreamingMethod<ArrowMessage, PutResult> {
     private final FlightService delegate;
 
     public DoPutMethod(FlightService delegate) {

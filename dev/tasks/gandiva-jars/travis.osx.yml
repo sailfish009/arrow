@@ -15,7 +15,7 @@
 # limitations under the License.
 
 os: osx
-osx_image: xcode8.3
+osx_image: xcode9.4
 sudo: required
 language: cpp
 compiler: clang
@@ -33,15 +33,25 @@ env:
     - ARROW_TRAVIS_GANDIVA=1
 
 before_script:
-  - git clone -b {{ arrow.branch }} {{ arrow.remote }} arrow
-  - git -C arrow checkout {{ arrow.head }}
+  - git clone --no-checkout {{ arrow.remote }} arrow
+  - git -C arrow fetch -t {{ arrow.remote }} {{ arrow.branch }}
+  - if [ $CROSSBOW_USE_COMMIT_ID = true ]; then git -C arrow checkout {{ arrow.head }}; else git -C arrow checkout FETCH_HEAD; fi
+
   - export TRAVIS_BUILD_DIR=$TRAVIS_BUILD_DIR/arrow
-  - arrow/ci/travis_install_toolchain.sh
+  - brew update
+  - brew install bison flex llvm@7
+  - brew tap adoptopenjdk/openjdk
+  - brew cask install adoptopenjdk8
+  - export JAVA_HOME=/Library/Java/JavaVirtualMachines/adoptopenjdk-8.jdk/Contents/Home
+  - export PATH="$JAVA_HOME/bin:$PATH"
+  - echo $JAVA_HOME
+  - which java
 
 script:
+  - cd arrow
   - mkdir -p dist
-  - arrow/dev/tasks/gandiva-jars/build-cpp.sh || travis_terminate 1
-  - arrow/dev/tasks/gandiva-jars/build-java.sh || travis_terminate 1
+  - dev/tasks/gandiva-jars/build-cpp-osx.sh || travis_terminate 1
+  - dev/tasks/gandiva-jars/build-java.sh || travis_terminate 1
 
 deploy:
   provider: releases

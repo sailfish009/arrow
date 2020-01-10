@@ -17,12 +17,13 @@
 package array
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"sync/atomic"
 
 	"github.com/apache/arrow/go/arrow"
-	"github.com/apache/arrow/go/arrow/internal/bitutil"
+	"github.com/apache/arrow/go/arrow/bitutil"
 	"github.com/apache/arrow/go/arrow/internal/debug"
 	"github.com/apache/arrow/go/arrow/memory"
 )
@@ -46,27 +47,78 @@ func (a *Struct) Field(i int) Interface { return a.fields[i] }
 
 func (a *Struct) String() string {
 	o := new(strings.Builder)
-	o.WriteString("[")
+	o.WriteString("{")
+
+	structBitmap := a.NullBitmapBytes()
 	for i, v := range a.fields {
 		if i > 0 {
 			o.WriteString(" ")
 		}
-		switch {
-		case a.IsNull(i):
-			o.WriteString("(null)")
-		default:
-			fmt.Fprintf(o, "%v", v)
+		if !bytes.Equal(structBitmap, v.NullBitmapBytes()) {
+			masked := a.newStructFieldWithParentValidityMask(i)
+			fmt.Fprintf(o, "%v", masked)
+			masked.Release()
+			continue
+		}
+		fmt.Fprintf(o, "%v", v)
+	}
+	o.WriteString("}")
+	return o.String()
+}
+
+// newStructFieldWithParentValidityMask returns the Interface at fieldIndex
+// with a nullBitmapBytes adjusted according on the parent struct nullBitmapBytes.
+// From the docs:
+//   "When reading the struct array the parent validity bitmap takes priority."
+func (a *Struct) newStructFieldWithParentValidityMask(fieldIndex int) Interface {
+	field := a.Field(fieldIndex)
+	nullBitmapBytes := field.NullBitmapBytes()
+	maskedNullBitmapBytes := make([]byte, len(nullBitmapBytes))
+	copy(maskedNullBitmapBytes, nullBitmapBytes)
+	for i := 0; i < field.Len(); i++ {
+		if !a.IsValid(i) {
+			bitutil.ClearBit(maskedNullBitmapBytes, i)
 		}
 	}
-	o.WriteString("]")
-	return o.String()
+	data := NewSliceData(field.Data(), 0, int64(field.Len()))
+	defer data.Release()
+	bufs := make([]*memory.Buffer, len(data.buffers))
+	copy(bufs, data.buffers)
+	bufs[0].Release()
+	bufs[0] = memory.NewBufferBytes(maskedNullBitmapBytes)
+	data.buffers = bufs
+	maskedField := MakeFromData(data)
+	return maskedField
 }
 
 func (a *Struct) setData(data *Data) {
 	a.array.setData(data)
 	a.fields = make([]Interface, len(data.childData))
 	for i, child := range data.childData {
-		a.fields[i] = MakeFromData(child)
+		if data.offset != 0 || child.length != data.length {
+			sub := NewSliceData(child, int64(data.offset), int64(data.offset+data.length))
+			a.fields[i] = MakeFromData(sub)
+			sub.Release()
+		} else {
+			a.fields[i] = MakeFromData(child)
+		}
+	}
+}
+
+func arrayEqualStruct(left, right *Struct) bool {
+	for i, lf := range left.fields {
+		rf := right.fields[i]
+		if !ArrayEqual(lf, rf) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *Struct) Retain() {
+	a.array.Retain()
+	for _, f := range a.fields {
+		f.Retain()
 	}
 }
 

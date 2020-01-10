@@ -32,6 +32,13 @@ namespace Apache.Arrow
                 _metadata = new Dictionary<string, string>();
             }
 
+            public Builder Clear()
+            {
+                _fields.Clear();
+                _metadata.Clear();
+                return this;
+            }
+
             public Builder Field(Field field)
             {
                 if (field == null) return this;
@@ -60,6 +67,19 @@ namespace Apache.Arrow
                 }
 
                 _metadata[key] = value;
+                return this;
+            }
+
+            public Builder Metadata(IEnumerable<KeyValuePair<string, string>> dictionary)
+            {
+                if (dictionary == null)
+                {
+                    throw new ArgumentNullException(nameof(dictionary));
+                }
+                foreach (KeyValuePair<string, string> entry in dictionary)
+                {
+                    this.Metadata(entry.Key, entry.Value);
+                }
                 return this;
             }
 

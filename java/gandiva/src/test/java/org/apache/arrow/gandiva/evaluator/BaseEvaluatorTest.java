@@ -18,7 +18,7 @@
 package org.apache.arrow.gandiva.evaluator;
 
 import java.math.BigDecimal;
-import java.math.BigInteger;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -32,12 +32,12 @@ import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.DecimalVector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.ValueVector;
+import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.ipc.message.ArrowFieldNode;
 import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.joda.time.Instant;
 import org.junit.After;
 import org.junit.Before;
 
@@ -133,9 +133,9 @@ class BaseEvaluatorTest {
 
   interface DataAndVectorGenerator {
 
-    public void writeData(ArrowBuf buffer);
+    void writeData(ArrowBuf buffer);
 
-    public ValueVector generateOutputVector(int numRowsInBatch);
+    ValueVector generateOutputVector(int numRowsInBatch);
   }
 
   class Int32DataAndVectorGenerator implements DataAndVectorGenerator {
@@ -244,6 +244,17 @@ class BaseEvaluatorTest {
     return vector;
   }
 
+  VarCharVector varcharVector(String[] values) {
+    VarCharVector vector = new VarCharVector("VarCharVector" + Math.random(), allocator);
+    vector.allocateNew();
+    for (int i = 0; i < values.length; i++) {
+      vector.setSafe(i, values[i].getBytes(), 0, values[i].length());
+    }
+
+    vector.setValueCount(values.length);
+    return vector;
+  }
+
   ArrowBuf longBuf(long[] longs) {
     ArrowBuf buffer = allocator.buffer(longs.length * 8);
     for (int i = 0; i < longs.length; i++) {
@@ -265,7 +276,7 @@ class BaseEvaluatorTest {
     ArrowBuf buffer = allocator.buffer(dates.length * 8);
     for (int i = 0; i < dates.length; i++) {
       Instant instant = Instant.parse(dates[i]);
-      buffer.writeLong(instant.getMillis());
+      buffer.writeLong(instant.toEpochMilli());
     }
 
     return buffer;
@@ -278,7 +289,7 @@ class BaseEvaluatorTest {
     List<ArrowBuf> buffers = recordBatch.getBuffers();
     recordBatch.close();
     for (ArrowBuf buf : buffers) {
-      buf.release();
+      buf.getReferenceManager().release();
     }
   }
 

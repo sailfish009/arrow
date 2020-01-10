@@ -22,11 +22,13 @@ set -e
 # overrides multibuild's default build_wheel
 function build_wheel {
     pip install -U pip
-    pip install setuptools_scm
+
+    # ARROW-5670: Python 3.5 can fail with HTTPS error in CMake build
+    pip install setuptools_scm requests
 
     # Include brew installed versions of flex and bison.
     # We need them to build Thrift. The ones that come with Xcode are too old.
-    export PATH="/usr/local/opt/flex/bin:/usr/local/opt/bison/bin:$PATH"
+    export PATH="$(brew --prefix flex)/bin:$(brew --prefix bison)/bin:$PATH"
 
     echo `pwd`
     echo CFLAGS=${CFLAGS}
@@ -35,11 +37,11 @@ function build_wheel {
 
     pushd $1
 
-    boost_version="1.65.1"
+    boost_version="1.66.0"
     boost_directory_name="boost_${boost_version//\./_}"
     boost_tarball_name="${boost_directory_name}.tar.gz"
-    wget --no-check-certificate \
-        http://downloads.sourceforge.net/project/boost/boost/"${boost_version}"/"${boost_tarball_name}" \
+    wget -nv --no-check-certificate \
+        https://downloads.sourceforge.net/project/boost/boost/"${boost_version}"/"${boost_tarball_name}" \
         -O "${boost_tarball_name}"
     tar xf "${boost_tarball_name}"
 
@@ -60,7 +62,7 @@ function build_wheel {
     ./b2 tools/bcp > /dev/null 2>&1
     ./dist/bin/bcp --namespace=arrow_boost --namespace-alias \
         filesystem date_time system regex build algorithm locale format \
-        "$arrow_boost" > /dev/null 2>&1
+        multiprecision/cpp_int "$arrow_boost" > /dev/null 2>&1
     popd
 
     # Now build our custom namespaced Boost version.
@@ -102,25 +104,55 @@ function build_wheel {
 
     pip install $(pip_opts) -r python/requirements-wheel.txt cython
 
+    if [ ${MB_PYTHON_VERSION} != "2.7" ]; then
+      # Gandiva is not supported on Python 2.7
+      export PYARROW_WITH_GANDIVA=1
+      export BUILD_ARROW_GANDIVA=ON
+    else
+      export PYARROW_WITH_GANDIVA=0
+      export BUILD_ARROW_GANDIVA=OFF
+    fi
+
+    git submodule update --init
+    export ARROW_TEST_DATA=`pwd`/testing/data
+
     pushd cpp
     mkdir build
     pushd build
-    cmake -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_INSTALL_PREFIX=$ARROW_HOME \
-          -DARROW_BUILD_TESTS=OFF \
+    cmake -DARROW_BOOST_USE_SHARED=ON \
           -DARROW_BUILD_SHARED=ON \
+          -DARROW_BUILD_TESTS=OFF \
+          -DARROW_DEPENDENCY_SOURCE=BUNDLED \
+          -DARROW_FLIGHT=ON \
+          -DARROW_GANDIVA=${BUILD_ARROW_GANDIVA} \
           -DARROW_BOOST_USE_SHARED=ON \
           -DARROW_JEMALLOC=ON \
-          -DARROW_PLASMA=ON \
-          -DARROW_RPATH_ORIGIN=ON \
-          -DARROW_PYTHON=ON \
+          -DARROW_ORC=OFF \
           -DARROW_PARQUET=ON \
-          -DARROW_ORC=ON \
+          -DARROW_PLASMA=ON \
+          -DARROW_PROTOBUF_USE_SHARED=OFF \
+          -DARROW_PYTHON=ON \
+          -DARROW_RPATH_ORIGIN=ON \
+          -DARROW_VERBOSE_THIRDPARTY_BUILD=ON \
+          -DARROW_WITH_BROTLI=ON \
+          -DARROW_WITH_BZ2=ON \
+          -DARROW_WITH_LZ4=ON \
+          -DARROW_WITH_SNAPPY=ON \
+          -DARROW_WITH_ZLIB=ON \
+          -DARROW_WITH_ZSTD=ON \
+          -DBOOST_SOURCE=SYSTEM \
           -DBOOST_ROOT="$arrow_boost_dist" \
           -DBoost_NAMESPACE=arrow_boost \
+          -DBoost_NO_BOOST_CMAKE=ON \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=$ARROW_HOME \
+          -DLLVM_SOURCE=SYSTEM \
           -DMAKE=make \
+          -DOPENSSL_USE_STATIC_LIBS=ON \
+          -DProtobuf_SOURCE=SYSTEM \
+          -DgRPC_SOURCE=SYSTEM \
           ..
-    make -j5
+    make -j$(sysctl -n hw.logicalcpu)
     make install
     popd
     popd
@@ -132,51 +164,64 @@ function build_wheel {
     unset ARROW_HOME
     unset PARQUET_HOME
 
+    export PYARROW_WITH_FLIGHT=1
+    export PYARROW_WITH_PLASMA=1
     export PYARROW_WITH_PARQUET=1
-    export PYARROW_WITH_ORC=1
+    export PYARROW_WITH_ORC=0
     export PYARROW_WITH_JEMALLOC=1
     export PYARROW_WITH_PLASMA=1
     export PYARROW_BUNDLE_BOOST=1
     export PYARROW_BUNDLE_ARROW_CPP=1
     export PYARROW_BUILD_TYPE='release'
-    export PYARROW_CMAKE_OPTIONS="-DBOOST_ROOT=$arrow_boost_dist"
+    export PYARROW_BOOST_NAMESPACE='arrow_boost'
+    PYARROW_CMAKE_OPTIONS=""
+    PYARROW_CMAKE_OPTIONS="${PYARROW_CMAKE_OPTIONS} -DBOOST_ROOT=$arrow_boost_dist"
+    PYARROW_CMAKE_OPTIONS="${PYARROW_CMAKE_OPTIONS} -DBoost_NO_BOOST_CMAKE=ON"
+    export PYARROW_CMAKE_OPTIONS
     export SETUPTOOLS_SCM_PRETEND_VERSION=$PYARROW_VERSION
     pushd python
-    python setup.py build_ext \
-           --with-plasma --with-orc --with-parquet \
-           --bundle-arrow-cpp --bundle-boost --boost-namespace=arrow_boost \
-           bdist_wheel
+    python setup.py build_ext bdist_wheel
     ls -l dist/
     popd
 
     popd
 }
 
-# overrides multibuild's default install_run
-function install_run {
+function install_wheel {
     multibuild_dir=`realpath $MULTIBUILD_DIR`
 
     pushd $1  # enter arrow's directory
-
     wheelhouse="$PWD/python/dist"
 
     # Install compatible wheel
     pip install $(pip_opts) \
         $(python $multibuild_dir/supported_wheels.py $wheelhouse/*.whl)
 
-    # Runs tests on installed distribution from an empty directory
-    python --version
+    popd
+}
 
-    # Test optional dependencies
-    python -c "import pyarrow"
-    python -c "import pyarrow.orc"
-    python -c "import pyarrow.parquet"
-    python -c "import pyarrow.plasma"
+function run_unit_tests {
+    pushd $1
 
-    # Run pyarrow tests
+    # Install test dependencies
     pip install $(pip_opts) -r python/requirements-test.txt
 
-    py.test --pyargs pyarrow
+    # Run pyarrow tests
+    pytest -rs --pyargs pyarrow
 
     popd
+}
+
+function run_import_tests {
+    # Test optional dependencies
+    python -c "
+import sys
+import pyarrow
+import pyarrow.parquet
+import pyarrow.plasma
+
+if sys.version_info.major > 2:
+    import pyarrow.flight
+    import pyarrow.gandiva
+"
 }

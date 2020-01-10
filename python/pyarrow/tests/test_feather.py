@@ -25,13 +25,24 @@ import pytest
 from numpy.testing import assert_array_equal
 import numpy as np
 
-from pandas.util.testing import assert_frame_equal
-import pandas as pd
-
 import pyarrow as pa
 from pyarrow.feather import (read_feather, write_feather,
                              read_table, FeatherReader, FeatherDataset)
 from pyarrow.lib import FeatherWriter
+
+
+try:
+    from pandas.util.testing import assert_frame_equal
+    import pandas as pd
+    import pyarrow.pandas_compat
+except ImportError:
+    pass
+
+
+# TODO(wesm): The Feather tests currently are tangled with pandas
+# dependency. We should isolate the pandas-depending parts and mark those with
+# pytest.mark.pandas
+pytestmark = pytest.mark.pandas
 
 
 def random_path(prefix='feather_'):
@@ -59,7 +70,8 @@ class TestFeatherReader(unittest.TestCase):
         counts = []
         for i in range(reader.num_columns):
             col = reader.get_column(i)
-            if columns is None or col.name in columns:
+            name = reader.get_column_name(i)
+            if columns is None or name in columns:
                 counts.append(col.null_count)
 
         return counts
@@ -429,9 +441,9 @@ class TestFeatherReader(unittest.TestCase):
         self._check_pandas_roundtrip(df)
 
     def test_timestamp_with_nulls(self):
-        df = pd.DataFrame({'test': [pd.datetime(2016, 1, 1),
+        df = pd.DataFrame({'test': [pd.Timestamp(2016, 1, 1),
                                     None,
-                                    pd.datetime(2016, 1, 3)]})
+                                    pd.Timestamp(2016, 1, 3)]})
         df['with_tz'] = df.test.dt.tz_localize('utc')
 
         self._check_pandas_roundtrip(df, null_counts=[1, 1])
@@ -504,7 +516,11 @@ class TestFeatherReader(unittest.TestCase):
         result = read_feather(buf)
         assert_frame_equal(result, df)
 
+    @pytest.mark.filterwarnings("ignore:Sparse:FutureWarning")
+    @pytest.mark.filterwarnings("ignore:DataFrame.to_sparse:FutureWarning")
     def test_sparse_dataframe(self):
+        if not pa.pandas_compat._pandas_api.has_sparse:
+            pytest.skip("version of pandas does not support SparseDataFrame")
         # GH #221
         data = {'A': [0, 1, 2],
                 'B': [1, 0, 1]}
@@ -524,8 +540,11 @@ class TestFeatherReader(unittest.TestCase):
         # https://github.com/wesm/feather/issues/240
         # serializing actual python objects
 
-        # period
-        df = pd.DataFrame({'a': pd.period_range('2013', freq='M', periods=3)})
+        # custom python objects
+        class A:
+            pass
+
+        df = pd.DataFrame({'a': [A(), A()]})
         self._assert_error_on_write(df, ValueError)
 
         # non-strings

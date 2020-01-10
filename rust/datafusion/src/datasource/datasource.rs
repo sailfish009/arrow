@@ -17,35 +17,27 @@
 
 //! Data source traits
 
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow::datatypes::Schema;
-use arrow::record_batch::RecordBatch;
 
-use crate::execution::error::Result;
+use crate::error::Result;
+use crate::execution::physical_plan::BatchIterator;
 
-pub type ScanResult = Rc<RefCell<RecordBatchIterator>>;
+/// Returned by implementors of `Table#scan`, this `BatchIterator` is wrapped with
+/// an `Arc` and `Mutex` so that it can be shared across threads as it is used.
+pub type ScanResult = Arc<Mutex<dyn BatchIterator>>;
 
 /// Source table
-pub trait Table {
+pub trait TableProvider {
     /// Get a reference to the schema for this table
-    fn schema(&self) -> &Arc<Schema>;
+    fn schema(&self) -> Arc<Schema>;
 
-    /// Perform a scan of a table and return an iterator over the data
+    /// Perform a scan of a table and return a sequence of iterators over the data (one
+    /// iterator per partition)
     fn scan(
         &self,
         projection: &Option<Vec<usize>>,
         batch_size: usize,
-    ) -> Result<ScanResult>;
-}
-
-/// Iterator for reading a series of record batches with a known schema
-pub trait RecordBatchIterator {
-    /// Get the schema of this iterator
-    fn schema(&self) -> &Arc<Schema>;
-
-    /// Get the next batch in this iterator
-    fn next(&mut self) -> Result<Option<RecordBatch>>;
+    ) -> Result<Vec<ScanResult>>;
 }

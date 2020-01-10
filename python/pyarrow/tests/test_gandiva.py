@@ -19,7 +19,6 @@ import datetime
 import pytest
 
 import pyarrow as pa
-import pandas as pd
 
 
 @pytest.mark.gandiva
@@ -60,12 +59,12 @@ def test_tree_exp_builder():
 def test_table():
     import pyarrow.gandiva as gandiva
 
-    df = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
-    table = pa.Table.from_pandas(df)
+    table = pa.Table.from_arrays([pa.array([1.0, 2.0]), pa.array([3.0, 4.0])],
+                                 ['a', 'b'])
 
     builder = gandiva.TreeExprBuilder()
-    node_a = builder.make_field(table.schema.field_by_name("a"))
-    node_b = builder.make_field(table.schema.field_by_name("b"))
+    node_a = builder.make_field(table.schema.field("a"))
+    node_b = builder.make_field(table.schema.field("b"))
 
     sum = builder.make_function("add", [node_a, node_b], pa.float64())
 
@@ -79,7 +78,7 @@ def test_table():
     # RecordBatches
     r, = projector.evaluate(table.to_batches()[0])
 
-    e = pa.Array.from_pandas(df["a"] + df["b"])
+    e = pa.array([4.0, 6.0])
     assert r.equals(e)
 
 
@@ -87,11 +86,11 @@ def test_table():
 def test_filter():
     import pyarrow.gandiva as gandiva
 
-    df = pd.DataFrame({"a": [1.0 * i for i in range(10000)]})
-    table = pa.Table.from_pandas(df)
+    table = pa.Table.from_arrays([pa.array([1.0 * i for i in range(10000)])],
+                                 ['a'])
 
     builder = gandiva.TreeExprBuilder()
-    node_a = builder.make_field(table.schema.field_by_name("a"))
+    node_a = builder.make_field(table.schema.field("a"))
     thousand = builder.make_literal(1000.0, pa.float64())
     cond = builder.make_function("less_than", [node_a, thousand], pa.bool_())
     condition = builder.make_condition(cond)
@@ -110,7 +109,7 @@ def test_in_expr():
 
     # string
     builder = gandiva.TreeExprBuilder()
-    node_a = builder.make_field(table.schema.field_by_name("a"))
+    node_a = builder.make_field(table.schema.field("a"))
     cond = builder.make_in_expression(node_a, [u"an", u"nd"], pa.string())
     condition = builder.make_condition(cond)
     filter = gandiva.make_filter(table.schema, condition)
@@ -120,7 +119,7 @@ def test_in_expr():
     # int32
     arr = pa.array([3, 1, 4, 1, 5, 9, 2, 6, 5, 4])
     table = pa.Table.from_arrays([arr.cast(pa.int32())], ["a"])
-    node_a = builder.make_field(table.schema.field_by_name("a"))
+    node_a = builder.make_field(table.schema.field("a"))
     cond = builder.make_in_expression(node_a, [1, 5], pa.int32())
     condition = builder.make_condition(cond)
     filter = gandiva.make_filter(table.schema, condition)
@@ -130,7 +129,7 @@ def test_in_expr():
     # int64
     arr = pa.array([3, 1, 4, 1, 5, 9, 2, 6, 5, 4])
     table = pa.Table.from_arrays([arr], ["a"])
-    node_a = builder.make_field(table.schema.field_by_name("a"))
+    node_a = builder.make_field(table.schema.field("a"))
     cond = builder.make_in_expression(node_a, [1, 5], pa.int64())
     condition = builder.make_condition(cond)
     filter = gandiva.make_filter(table.schema, condition)
@@ -152,7 +151,7 @@ def test_in_expr_todo():
     table = pa.Table.from_arrays([arr], ["a"])
 
     builder = gandiva.TreeExprBuilder()
-    node_a = builder.make_field(table.schema.field_by_name("a"))
+    node_a = builder.make_field(table.schema.field("a"))
     cond = builder.make_in_expression(node_a, [b'an', b'nd'], pa.binary())
     condition = builder.make_condition(cond)
 
@@ -169,7 +168,7 @@ def test_in_expr_todo():
     table = pa.Table.from_arrays([arr], ["a"])
 
     builder = gandiva.TreeExprBuilder()
-    node_a = builder.make_field(table.schema.field_by_name("a"))
+    node_a = builder.make_field(table.schema.field("a"))
     cond = builder.make_in_expression(node_a, [datetime_2], pa.timestamp('ms'))
     condition = builder.make_condition(cond)
 
@@ -186,7 +185,7 @@ def test_in_expr_todo():
     table = pa.Table.from_arrays([arr], ["a"])
 
     builder = gandiva.TreeExprBuilder()
-    node_a = builder.make_field(table.schema.field_by_name("a"))
+    node_a = builder.make_field(table.schema.field("a"))
     cond = builder.make_in_expression(node_a, [time_2], pa.time64('ms'))
     condition = builder.make_condition(cond)
 
@@ -203,7 +202,7 @@ def test_in_expr_todo():
     table = pa.Table.from_arrays([arr], ["a"])
 
     builder = gandiva.TreeExprBuilder()
-    node_a = builder.make_field(table.schema.field_by_name("a"))
+    node_a = builder.make_field(table.schema.field("a"))
     cond = builder.make_in_expression(node_a, [date_2], pa.date32())
     condition = builder.make_condition(cond)
 
@@ -216,13 +215,14 @@ def test_in_expr_todo():
 def test_boolean():
     import pyarrow.gandiva as gandiva
 
-    df = pd.DataFrame({"a": [1., 31., 46., 3., 57., 44., 22.],
-                       "b": [5., 45., 36., 73., 83., 23., 76.]})
-    table = pa.Table.from_pandas(df)
+    table = pa.Table.from_arrays([pa.array([1., 31., 46., 3., 57., 44., 22.]),
+                                  pa.array([5., 45., 36., 73.,
+                                            83., 23., 76.])],
+                                 ['a', 'b'])
 
     builder = gandiva.TreeExprBuilder()
-    node_a = builder.make_field(table.schema.field_by_name("a"))
-    node_b = builder.make_field(table.schema.field_by_name("b"))
+    node_a = builder.make_field(table.schema.field("a"))
+    node_b = builder.make_field(table.schema.field("b"))
     fifty = builder.make_literal(50.0, pa.float64())
     eleven = builder.make_literal(11.0, pa.float64())
 
@@ -287,7 +287,7 @@ def test_regex():
     table = pa.Table.from_arrays([data], names=['a'])
 
     builder = gandiva.TreeExprBuilder()
-    node_a = builder.make_field(table.schema.field_by_name("a"))
+    node_a = builder.make_field(table.schema.field("a"))
     regex = builder.make_literal("%spark%", pa.string())
     like = builder.make_function("like", [node_a, regex], pa.bool_())
 

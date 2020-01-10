@@ -22,6 +22,7 @@
 #endif
 
 #include <arrow-glib/arrow-glib.hpp>
+#include <arrow-glib/internal-index.hpp>
 
 #include <parquet-glib/arrow-file-reader.hpp>
 
@@ -164,26 +165,24 @@ GParquetArrowFileReader *
 gparquet_arrow_file_reader_new_path(const gchar *path,
                                     GError **error)
 {
-  std::shared_ptr<arrow::io::MemoryMappedFile> arrow_memory_mapped_file;
-  auto status = arrow::io::MemoryMappedFile::Open(path,
-                                                  ::arrow::io::FileMode::READ,
-                                                  &arrow_memory_mapped_file);
-  if (!garrow_error_check(error,
-                          status,
-                          "[parquet][arrow][file-reader][new-path]")) {
+  auto arrow_memory_mapped_file =
+    arrow::io::MemoryMappedFile::Open(path, arrow::io::FileMode::READ);
+  if (!garrow::check(error,
+                     arrow_memory_mapped_file,
+                     "[parquet][arrow][file-reader][new-path]")) {
     return NULL;
   }
 
   std::shared_ptr<arrow::io::RandomAccessFile> arrow_random_access_file =
-    arrow_memory_mapped_file;
+    arrow_memory_mapped_file.ValueOrDie();
   auto arrow_memory_pool = arrow::default_memory_pool();
   std::unique_ptr<parquet::arrow::FileReader> parquet_arrow_file_reader;
-  status = parquet::arrow::OpenFile(arrow_random_access_file,
-                                    arrow_memory_pool,
-                                    &parquet_arrow_file_reader);
-  if (garrow_error_check(error,
-                         status,
-                         "[parquet][arrow][file-reader][new-path]")) {
+  auto status = parquet::arrow::OpenFile(arrow_random_access_file,
+                                         arrow_memory_pool,
+                                         &parquet_arrow_file_reader);
+  if (garrow::check(error,
+                    status,
+                    "[parquet][arrow][file-reader][new-path]")) {
     return gparquet_arrow_file_reader_new_raw(parquet_arrow_file_reader.release());
   } else {
     return NULL;
@@ -230,15 +229,8 @@ gparquet_arrow_file_reader_get_schema(GParquetArrowFileReader *reader,
 {
   auto parquet_arrow_file_reader = gparquet_arrow_file_reader_get_raw(reader);
 
-  const auto n_columns =
-    parquet_arrow_file_reader->parquet_reader()->metadata()->num_columns();
-  std::vector<int> indices(n_columns);
-  for (int i = 0; i < n_columns; ++i) {
-    indices[i] = i;
-  }
-
   std::shared_ptr<arrow::Schema> arrow_schema;
-  auto status = parquet_arrow_file_reader->GetSchema(indices, &arrow_schema);
+  auto status = parquet_arrow_file_reader->GetSchema(&arrow_schema);
   if (garrow_error_check(error,
                          status,
                          "[parquet][arrow][file-reader][get-schema]")) {
@@ -249,78 +241,44 @@ gparquet_arrow_file_reader_get_schema(GParquetArrowFileReader *reader,
 }
 
 /**
- * gparquet_arrow_file_reader_select_schema:
+ * gparquet_arrow_file_reader_read_column_data:
  * @reader: A #GParquetArrowFileReader.
- * @column_indexes: (array length=n_column_indexes):
- *   The array of column indexes to be selected
- * @n_column_indexes: The length of `column_indexes`.
+ * @i: The index of the column to be read. If it's negative, index is
+ *   counted backward from the end of the columns. `-1` means the last
+ *   column.
  * @error: (nullable): Return locatipcn for a #GError or %NULL.
  *
- * Returns: (transfer full) (nullable): A selected #GArrowSchema.
+ * Returns: (transfer full) (nullable): A read #GArrowChunkedArray.
  *
- * Since: 0.12.0
+ * Since: 1.0.0
  */
-GArrowSchema *
-gparquet_arrow_file_reader_select_schema(GParquetArrowFileReader *reader,
-                                         gint *column_indexes,
-                                         gsize n_column_indexes,
-                                         GError **error)
+GArrowChunkedArray *
+gparquet_arrow_file_reader_read_column_data(GParquetArrowFileReader *reader,
+                                            gint i,
+                                            GError **error)
 {
+  const auto tag = "[parquet][arrow][file-reader][read-column-data]";
   auto parquet_arrow_file_reader = gparquet_arrow_file_reader_get_raw(reader);
 
-  std::vector<int> indices(n_column_indexes);
-  for (gsize i = 0; i < n_column_indexes; ++i) {
-    indices[i] = column_indexes[i];
-  }
-
-  std::shared_ptr<arrow::Schema> arrow_schema;
-  auto status = parquet_arrow_file_reader->GetSchema(indices, &arrow_schema);
-  if (garrow_error_check(error,
-                         status,
-                         "[parquet][arrow][file-reader][select-schema]")) {
-    return garrow_schema_new_raw(&arrow_schema);
-  } else {
-    return NULL;
-  }
-}
-
-/**
- * gparquet_arrow_file_reader_read_column:
- * @reader: A #GParquetArrowFileReader.
- * @column_index: Index integer of the column to be read.
- * @error: (nullable): Return locatipcn for a #GError or %NULL.
- *
- * Returns: (transfer full) (nullable): A read #GArrowColumn.
- *
- * Since: 0.12.0
- */
-GArrowColumn *
-gparquet_arrow_file_reader_read_column(GParquetArrowFileReader *reader,
-                                       gint column_index,
-                                       GError **error)
-{
-  auto parquet_arrow_file_reader = gparquet_arrow_file_reader_get_raw(reader);
-
-  std::vector<int> indices = {column_index};
-  std::shared_ptr<arrow::Schema> arrow_schema;
-  auto status = parquet_arrow_file_reader->GetSchema(indices, &arrow_schema);
-  if (!garrow_error_check(error,
-                          status,
-                          "[parquet][arrow][file-reader][read-column][get-schema]")) {
+  const auto n_columns =
+    parquet_arrow_file_reader->parquet_reader()->metadata()->num_columns();
+  if (!garrow_internal_index_adjust(i, n_columns)) {
+    garrow_error_check(error,
+                       arrow::Status::IndexError("Out of index: "
+                                                 "<0..", n_columns, ">: "
+                                                 "<", i, ">"),
+                       tag);
     return NULL;
   }
 
   std::shared_ptr<arrow::ChunkedArray> arrow_chunked_array;
-  status = parquet_arrow_file_reader->ReadColumn(column_index, &arrow_chunked_array);
-  if (!garrow_error_check(error,
-                          status,
-                          "[parquet][arrow][file-reader][read-column]")) {
+  auto status =
+    parquet_arrow_file_reader->ReadColumn(i, &arrow_chunked_array);
+  if (!garrow_error_check(error, status, tag)) {
     return NULL;
   }
 
-  auto arrow_field = arrow_schema->field(0);
-  auto arrow_column = std::make_shared<arrow::Column>(arrow_field, arrow_chunked_array);
-  return garrow_column_new_raw(&arrow_column);
+  return garrow_chunked_array_new_raw(&arrow_chunked_array);
 }
 
 /**

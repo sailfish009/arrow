@@ -17,7 +17,7 @@
 
 AC_PREREQ(2.65)
 
-m4_define([arrow_glib_version], 0.13.0-SNAPSHOT)
+m4_define([arrow_glib_version], 1.0.0-SNAPSHOT)
 AC_INIT([arrow-glib],
         arrow_glib_version,
         [https://issues.apache.org/jira/browse/ARROW],
@@ -52,6 +52,15 @@ AC_SUBST(GARROW_VERSION_MINOR)
 AC_SUBST(GARROW_VERSION_MICRO)
 AC_SUBST(GARROW_VERSION_TAG)
 
+GGANDIVA_VERSION_MAJOR=${GARROW_VERSION_MAJOR}
+GGANDIVA_VERSION_MINOR=${GARROW_VERSION_MINOR}
+GGANDIVA_VERSION_MICRO=${GARROW_VERSION_MICRO}
+GGANDIVA_VERSION_TAG=${GARROW_VERSION_TAG}
+AC_SUBST(GGANDIVA_VERSION_MAJOR)
+AC_SUBST(GGANDIVA_VERSION_MINOR)
+AC_SUBST(GGANDIVA_VERSION_MICRO)
+AC_SUBST(GGANDIVA_VERSION_TAG)
+
 AC_CANONICAL_HOST
 AC_MSG_CHECKING([for macOS])
 case "$host_os" in
@@ -66,7 +75,7 @@ AC_MSG_RESULT([$os_macos])
 AM_CONDITIONAL(OS_MACOS, test "$os_macos" = "yes")
 
 LT_INIT
-LT_CURRENT=${GARROW_VERSION_MINOR}
+LT_CURRENT=$(expr ${GARROW_VERSION_MAJOR} \* 100 + ${GARROW_VERSION_MINOR})
 LT_REVISION=${GARROW_VERSION_MICRO}
 LT_AGE=0
 LT_VERSION_INFO="\$(LT_CURRENT):\$(LT_REVISION):\$(LT_AGE)"
@@ -96,6 +105,17 @@ if test "x$GARROW_DEBUG" != "xno"; then
     CXXFLAGS="$CXXFLAGS -O0 -g3"
   fi
 fi
+AC_ARG_ENABLE(development-mode,
+  [AS_HELP_STRING([--enable-development-mode],
+                  [Use development mode (default=no)])],
+  [GARROW_DEVELOPMENT_MODE="$enableval"],
+  [GARROW_DEVELOPMENT_MODE="no"])
+if test "x$GARROW_DEVELOPMENT_MODE" != "xno"; then
+  if test "$CLANG" = "yes" -o "$GCC" = "yes"; then
+    CFLAGS="$CFLAGS -Werror"
+    CXXFLAGS="$CXXFLAGS -Werror"
+  fi
+fi
 AC_SUBST(GARROW_CFLAGS)
 AC_SUBST(GARROW_CXXFLAGS)
 
@@ -104,7 +124,7 @@ AM_PATH_GLIB_2_0([2.32.4],
                  [AC_MSG_ERROR(GLib isn't available)],
                  [gobject gio])
 
-GOBJECT_INTROSPECTION_REQUIRE([1.32.1])
+GOBJECT_INTROSPECTION_CHECK([1.32.1])
 GTK_DOC_CHECK([1.18-2])
 
 AC_ARG_WITH(arrow-cpp-build-type,
@@ -266,6 +286,7 @@ AC_CONFIG_FILES([
   arrow-glib/version.h
   gandiva-glib/Makefile
   gandiva-glib/gandiva-glib.pc
+  gandiva-glib/version.h
   parquet-glib/Makefile
   parquet-glib/parquet-glib.pc
   plasma-glib/Makefile

@@ -24,28 +24,37 @@
 
 namespace arrow {
 
+template <typename T>
+class Iterator;
+
+template <typename T>
+class Result;
+
 class Status;
 
 class DataType;
+class KeyValueMetadata;
 class Array;
 struct ArrayData;
 class ArrayBuilder;
 class Field;
 class Tensor;
+struct Scalar;
 
 class ChunkedArray;
-class Column;
 class RecordBatch;
 class Table;
 
+using RecordBatchIterator = Iterator<std::shared_ptr<RecordBatch>>;
+
 class Buffer;
 class MemoryPool;
-class RecordBatch;
+class ResizableBuffer;
 class Schema;
 
 class DictionaryType;
 class DictionaryArray;
-class DictionaryScalar;
+struct DictionaryScalar;
 
 class NullType;
 class NullArray;
@@ -62,6 +71,11 @@ class BinaryArray;
 class BinaryBuilder;
 struct BinaryScalar;
 
+class LargeBinaryType;
+class LargeBinaryArray;
+class LargeBinaryBuilder;
+struct LargeBinaryScalar;
+
 class FixedSizeBinaryType;
 class FixedSizeBinaryArray;
 class FixedSizeBinaryBuilder;
@@ -72,10 +86,30 @@ class StringArray;
 class StringBuilder;
 struct StringScalar;
 
+class LargeStringType;
+class LargeStringArray;
+class LargeStringBuilder;
+struct LargeStringScalar;
+
 class ListType;
 class ListArray;
 class ListBuilder;
 struct ListScalar;
+
+class LargeListType;
+class LargeListArray;
+class LargeListBuilder;
+struct LargeListScalar;
+
+class MapType;
+class MapArray;
+class MapBuilder;
+struct MapScalar;
+
+class FixedSizeListType;
+class FixedSizeListArray;
+class FixedSizeListBuilder;
+struct FixedSizeListScalar;
 
 class StructType;
 class StructArray;
@@ -89,6 +123,7 @@ struct Decimal128Scalar;
 
 class UnionType;
 class UnionArray;
+struct UnionScalar;
 
 template <typename TypeClass>
 class NumericArray;
@@ -99,14 +134,11 @@ class NumericBuilder;
 template <typename TypeClass>
 class NumericTensor;
 
-template <typename TypeClass>
-struct NumericScalar;
-
 #define _NUMERIC_TYPE_DECL(KLASS)                     \
   class KLASS##Type;                                  \
   using KLASS##Array = NumericArray<KLASS##Type>;     \
   using KLASS##Builder = NumericBuilder<KLASS##Type>; \
-  using KLASS##Scalar = NumericScalar<KLASS##Type>;   \
+  struct KLASS##Scalar;                               \
   using KLASS##Tensor = NumericTensor<KLASS##Type>;
 
 _NUMERIC_TYPE_DECL(Int8)
@@ -123,37 +155,49 @@ _NUMERIC_TYPE_DECL(Double)
 
 #undef _NUMERIC_TYPE_DECL
 
-class Date64Type;
-using Date64Array = NumericArray<Date64Type>;
-using Date64Builder = NumericBuilder<Date64Type>;
-class Date64Scalar;
-
 class Date32Type;
 using Date32Array = NumericArray<Date32Type>;
 using Date32Builder = NumericBuilder<Date32Type>;
-class Date32Scalar;
+struct Date32Scalar;
+
+class Date64Type;
+using Date64Array = NumericArray<Date64Type>;
+using Date64Builder = NumericBuilder<Date64Type>;
+struct Date64Scalar;
 
 class Time32Type;
 using Time32Array = NumericArray<Time32Type>;
 using Time32Builder = NumericBuilder<Time32Type>;
-class Time32Scalar;
+struct Time32Scalar;
 
 class Time64Type;
 using Time64Array = NumericArray<Time64Type>;
 using Time64Builder = NumericBuilder<Time64Type>;
-class Time64Scalar;
+struct Time64Scalar;
 
 class TimestampType;
 using TimestampArray = NumericArray<TimestampType>;
 using TimestampBuilder = NumericBuilder<TimestampType>;
-class TimestampScalar;
+struct TimestampScalar;
 
-class IntervalType;
-using IntervalArray = NumericArray<IntervalType>;
-class IntervalScalar;
+class MonthIntervalType;
+using MonthIntervalArray = NumericArray<MonthIntervalType>;
+using MonthIntervalBuilder = NumericBuilder<MonthIntervalType>;
+struct MonthIntervalScalar;
+
+class DayTimeIntervalType;
+class DayTimeIntervalArray;
+class DayTimeIntervalBuilder;
+struct DayTimeIntervalScalar;
+
+class DurationType;
+using DurationArray = NumericArray<DurationType>;
+using DurationBuilder = NumericBuilder<DurationType>;
+struct DurationScalar;
 
 class ExtensionType;
 class ExtensionArray;
+struct ExtensionScalar;
 
 // ----------------------------------------------------------------------
 // (parameter-free) Factory functions
@@ -192,14 +236,25 @@ std::shared_ptr<DataType> ARROW_EXPORT float32();
 std::shared_ptr<DataType> ARROW_EXPORT float64();
 /// \brief Return a StringType instance
 std::shared_ptr<DataType> ARROW_EXPORT utf8();
+/// \brief Return a LargeStringType instance
+std::shared_ptr<DataType> ARROW_EXPORT large_utf8();
 /// \brief Return a BinaryType instance
 std::shared_ptr<DataType> ARROW_EXPORT binary();
+/// \brief Return a LargeBinaryType instance
+std::shared_ptr<DataType> ARROW_EXPORT large_binary();
 /// \brief Return a Date32Type instance
 std::shared_ptr<DataType> ARROW_EXPORT date32();
 /// \brief Return a Date64Type instance
 std::shared_ptr<DataType> ARROW_EXPORT date64();
 
 /// @}
+
+/// Return the process-wide default memory pool.
+ARROW_EXPORT MemoryPool* default_memory_pool();
+
+#ifndef ARROW_MEMORY_POOL_DEFAULT
+#define ARROW_MEMORY_POOL_DEFAULT = default_memory_pool()
+#endif
 
 }  // namespace arrow
 

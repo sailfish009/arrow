@@ -46,6 +46,9 @@ cdef class NullType(Scalar):
         """
         return None
 
+    def __eq__(self, other):
+        return NA
+
 
 _NULL = NA = NullType()
 
@@ -223,8 +226,8 @@ cdef class Date32Value(ArrayValue):
         cdef CDate32Array* ap = <CDate32Array*> self.sp_array.get()
 
         # Shift to seconds since epoch
-        return datetime.datetime.utcfromtimestamp(
-            int(ap.Value(self.index)) * 86400).date()
+        return (datetime.date(1970, 1, 1) +
+                datetime.timedelta(days=ap.Value(self.index)))
 
 
 cdef class Date64Value(ArrayValue):
@@ -237,8 +240,9 @@ cdef class Date64Value(ArrayValue):
         Return this value as a Python datetime.datetime instance.
         """
         cdef CDate64Array* ap = <CDate64Array*> self.sp_array.get()
-        return datetime.datetime.utcfromtimestamp(
-            ap.Value(self.index) / 1000).date()
+        return (datetime.date(1970, 1, 1) +
+                datetime.timedelta(
+                    days=ap.Value(self.index) / 86400000))
 
 
 cdef class Time32Value(ArrayValue):
@@ -258,8 +262,7 @@ cdef class Time32Value(ArrayValue):
             delta = datetime.timedelta(seconds=ap.Value(self.index))
             return (datetime.datetime(1970, 1, 1) + delta).time()
         else:
-            delta = datetime.timedelta(milliseconds=ap.Value(self.index))
-            return (datetime.datetime(1970, 1, 1) + delta).time()
+            return _box_time_milli(ap.Value(self.index))
 
 
 cdef class Time64Value(ArrayValue):
@@ -277,44 +280,94 @@ cdef class Time64Value(ArrayValue):
 
         cdef int64_t val = ap.Value(self.index)
         if dtype.unit() == TimeUnit_MICRO:
-            return (datetime.datetime(1970, 1, 1) +
-                    datetime.timedelta(microseconds=val)).time()
+            return _box_time_micro(val)
         else:
             return (datetime.datetime(1970, 1, 1) +
                     datetime.timedelta(microseconds=val / 1000)).time()
 
 
-cdef dict DATETIME_CONVERSION_FUNCTIONS
+cpdef _box_time_milli(int64_t val):
+    delta = datetime.timedelta(milliseconds=val)
+    return (datetime.datetime(1970, 1, 1) + delta).time()
 
-try:
-    import pandas as pd
-except ImportError:
-    DATETIME_CONVERSION_FUNCTIONS = {
-        TimeUnit_SECOND: lambda x, tzinfo: (
-            datetime.datetime.utcfromtimestamp(x).replace(tzinfo=tzinfo)
-        ),
-        TimeUnit_MILLI: lambda x, tzinfo: (
-            datetime.datetime.utcfromtimestamp(x / 1e3).replace(tzinfo=tzinfo)
-        ),
-        TimeUnit_MICRO: lambda x, tzinfo: (
-            datetime.datetime.utcfromtimestamp(x / 1e6).replace(tzinfo=tzinfo)
-        ),
-    }
-else:
-    DATETIME_CONVERSION_FUNCTIONS = {
-        TimeUnit_SECOND: lambda x, tzinfo: pd.Timestamp(
-            x * 1000000000, tz=tzinfo, unit='ns',
-        ),
-        TimeUnit_MILLI: lambda x, tzinfo: pd.Timestamp(
-            x * 1000000, tz=tzinfo, unit='ns',
-        ),
-        TimeUnit_MICRO: lambda x, tzinfo: pd.Timestamp(
-            x * 1000, tz=tzinfo, unit='ns',
-        ),
-        TimeUnit_NANO: lambda x, tzinfo: pd.Timestamp(
-            x, tz=tzinfo, unit='ns',
+
+cpdef _box_time_micro(int64_t val):
+    return (datetime.datetime(1970, 1, 1) +
+            datetime.timedelta(microseconds=val)).time()
+
+
+cdef dict _DATETIME_CONVERSION_FUNCTIONS = {}
+cdef c_bool _datetime_conversion_initialized = False
+
+
+cdef _add_micros_maybe_localize(dt, micros, tzinfo):
+    import pytz
+    dt = dt.replace(microsecond=micros)
+    if tzinfo is not None:
+        if not isinstance(tzinfo, datetime.tzinfo):
+            tzinfo = string_to_tzinfo(tzinfo)
+        dt = tzinfo.fromutc(dt)
+    return dt
+
+
+cdef _datetime_from_seconds(int64_t v):
+    return datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=v)
+
+
+def _nanoseconds_to_datetime_safe(v, tzinfo):
+    if v % 1000 != 0:
+        raise ValueError("Nanosecond timestamp {} is not safely convertible "
+                         " to microseconds to convert to datetime.datetime."
+                         " Install pandas to return as Timestamp with "
+                         " nanosecond support or access the .value attribute.")
+    v = v // 1000
+    micros = v % 1_000_000
+
+    dt = _datetime_from_seconds(v // 1_000_000)
+    return _add_micros_maybe_localize(dt, micros, tzinfo)
+
+
+def _microseconds_to_datetime(v, tzinfo):
+    micros = v % 1_000_000
+    dt = _datetime_from_seconds(v // 1_000_000)
+    return _add_micros_maybe_localize(dt, micros, tzinfo)
+
+
+def _millis_to_datetime(v, tzinfo):
+    millis = v % 1_000
+    dt = _datetime_from_seconds(v // 1000)
+    return _add_micros_maybe_localize(dt, millis * 1000, tzinfo)
+
+
+def _seconds_to_datetime(v, tzinfo):
+    dt = _datetime_from_seconds(v)
+    return _add_micros_maybe_localize(dt, 0, tzinfo)
+
+
+def _datetime_conversion_functions():
+    global _datetime_conversion_initialized
+    if _datetime_conversion_initialized:
+        return _DATETIME_CONVERSION_FUNCTIONS
+
+    _DATETIME_CONVERSION_FUNCTIONS.update({
+        TimeUnit_SECOND: _seconds_to_datetime,
+        TimeUnit_MILLI: _millis_to_datetime,
+        TimeUnit_MICRO: _microseconds_to_datetime,
+        TimeUnit_NANO: _nanoseconds_to_datetime_safe
+    })
+
+    try:
+        import pandas as pd
+        _DATETIME_CONVERSION_FUNCTIONS[TimeUnit_NANO] = (
+            lambda x, tzinfo: pd.Timestamp(
+                x, tz=tzinfo, unit='ns',
+            )
         )
-    }
+    except ImportError:
+        pass
+
+    _datetime_conversion_initialized = True
+    return _DATETIME_CONVERSION_FUNCTIONS
 
 
 cdef class TimestampValue(ArrayValue):
@@ -344,12 +397,72 @@ cdef class TimestampValue(ArrayValue):
             tzinfo = None
 
         try:
-            converter = DATETIME_CONVERSION_FUNCTIONS[dtype.unit()]
+            converter = _datetime_conversion_functions()[dtype.unit()]
         except KeyError:
             raise ValueError(
                 'Cannot convert nanosecond timestamps without pandas'
             )
         return converter(value, tzinfo=tzinfo)
+
+
+cdef dict _TIMEDELTA_CONVERSION_FUNCTIONS = {}
+
+
+def _nanoseconds_to_timedelta_safe(v):
+    if v % 1000 != 0:
+        raise ValueError(
+            "Nanosecond duration {} is not safely convertible to microseconds "
+            "to convert to datetime.timedelta. Install pandas to return as "
+            "Timedelta with nanosecond support or access the .value "
+            "attribute.".format(v))
+    micros = v // 1000
+
+    return datetime.timedelta(microseconds=micros)
+
+
+def _timedelta_conversion_functions():
+    if _TIMEDELTA_CONVERSION_FUNCTIONS:
+        return _TIMEDELTA_CONVERSION_FUNCTIONS
+
+    _TIMEDELTA_CONVERSION_FUNCTIONS.update({
+        TimeUnit_SECOND: lambda v: datetime.timedelta(seconds=v),
+        TimeUnit_MILLI: lambda v: datetime.timedelta(milliseconds=v),
+        TimeUnit_MICRO: lambda v: datetime.timedelta(microseconds=v),
+        TimeUnit_NANO: _nanoseconds_to_timedelta_safe
+    })
+
+    try:
+        import pandas as pd
+        _TIMEDELTA_CONVERSION_FUNCTIONS[TimeUnit_NANO] = (
+            lambda v: pd.Timedelta(v, unit='ns')
+        )
+    except ImportError:
+        pass
+
+    return _TIMEDELTA_CONVERSION_FUNCTIONS
+
+
+cdef class DurationValue(ArrayValue):
+    """
+    Concrete class for duration array elements.
+    """
+
+    @property
+    def value(self):
+        cdef CDurationArray* ap = <CDurationArray*> self.sp_array.get()
+        return ap.Value(self.index)
+
+    def as_py(self):
+        """
+        Return this value as a Pandas Timestamp instance (if available),
+        otherwise as a Python datetime.timedelta instance.
+        """
+        cdef CDurationArray* ap = <CDurationArray*> self.sp_array.get()
+        cdef CDurationType* dtype = <CDurationType*> ap.type().get()
+
+        cdef int64_t value = ap.Value(self.index)
+        converter = _timedelta_conversion_functions()[dtype.unit()]
+        return converter(value)
 
 
 cdef class HalfFloatValue(ArrayValue):
@@ -418,6 +531,43 @@ cdef class StringValue(ArrayValue):
         cdef CStringArray* ap = <CStringArray*> self.sp_array.get()
         return ap.GetString(self.index).decode('utf-8')
 
+    def as_buffer(self):
+        """
+        Return a view over this value as a Buffer object.
+        """
+        cdef:
+            CStringArray* ap = <CStringArray*> self.sp_array.get()
+            shared_ptr[CBuffer] buf
+
+        buf = SliceBuffer(ap.value_data(), ap.value_offset(self.index),
+                          ap.value_length(self.index))
+        return pyarrow_wrap_buffer(buf)
+
+
+cdef class LargeStringValue(ArrayValue):
+    """
+    Concrete class for large string (utf8) array elements.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python unicode string.
+        """
+        cdef CLargeStringArray* ap = <CLargeStringArray*> self.sp_array.get()
+        return ap.GetString(self.index).decode('utf-8')
+
+    def as_buffer(self):
+        """
+        Return a view over this value as a Buffer object.
+        """
+        cdef:
+            CLargeStringArray* ap = <CLargeStringArray*> self.sp_array.get()
+            shared_ptr[CBuffer] buf
+
+        buf = SliceBuffer(ap.value_data(), ap.value_offset(self.index),
+                          ap.value_length(self.index))
+        return pyarrow_wrap_buffer(buf)
+
 
 cdef class BinaryValue(ArrayValue):
     """
@@ -442,6 +592,36 @@ cdef class BinaryValue(ArrayValue):
         """
         cdef:
             CBinaryArray* ap = <CBinaryArray*> self.sp_array.get()
+            shared_ptr[CBuffer] buf
+
+        buf = SliceBuffer(ap.value_data(), ap.value_offset(self.index),
+                          ap.value_length(self.index))
+        return pyarrow_wrap_buffer(buf)
+
+
+cdef class LargeBinaryValue(ArrayValue):
+    """
+    Concrete class for large variable-sized binary array elements.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python bytes object.
+        """
+        cdef:
+            const uint8_t* ptr
+            int64_t length
+            CLargeBinaryArray* ap = <CLargeBinaryArray*> self.sp_array.get()
+
+        ptr = ap.GetValue(self.index, &length)
+        return cp.PyBytes_FromStringAndSize(<const char*>(ptr), length)
+
+    def as_buffer(self):
+        """
+        Return a view over this value as a Buffer object.
+        """
+        cdef:
+            CLargeBinaryArray* ap = <CLargeBinaryArray*> self.sp_array.get()
             shared_ptr[CBuffer] buf
 
         buf = SliceBuffer(ap.value_data(), ap.value_offset(self.index),
@@ -500,6 +680,163 @@ cdef class ListValue(ArrayValue):
         return result
 
 
+cdef class LargeListValue(ArrayValue):
+    """
+    Concrete class for large list array elements.
+    """
+
+    def __len__(self):
+        """
+        Return the number of values.
+        """
+        return self.length()
+
+    def __getitem__(self, i):
+        """
+        Return the value at the given index.
+        """
+        return self.getitem(_normalize_index(i, self.length()))
+
+    def __iter__(self):
+        """
+        Iterate over this element's values.
+        """
+        for i in range(len(self)):
+            yield self.getitem(i)
+        raise StopIteration
+
+    cdef void _set_array(self, const shared_ptr[CArray]& sp_array):
+        self.sp_array = sp_array
+        self.ap = <CLargeListArray*> sp_array.get()
+        self.value_type = pyarrow_wrap_data_type(self.ap.value_type())
+
+    cdef getitem(self, int64_t i):
+        cdef int64_t j = self.ap.value_offset(self.index) + i
+        return box_scalar(self.value_type, self.ap.values(), j)
+
+    cdef int64_t length(self):
+        return self.ap.value_length(self.index)
+
+    def as_py(self):
+        """
+        Return this value as a Python list.
+        """
+        cdef:
+            int64_t j
+            list result = []
+
+        for j in range(len(self)):
+            result.append(self.getitem(j).as_py())
+
+        return result
+
+
+cdef class MapValue(ArrayValue):
+    """
+    Concrete class for map array elements.
+    """
+
+    def __len__(self):
+        """
+        Return the number of values.
+        """
+        return self.length()
+
+    def __getitem__(self, i):
+        """
+        Return the value at the given index.
+        """
+        return self.getitem(_normalize_index(i, self.length()))
+
+    def __iter__(self):
+        """
+        Iterate over this element's values.
+        """
+        for i in range(len(self)):
+            yield self.getitem(i)
+        raise StopIteration
+
+    cdef void _set_array(self, const shared_ptr[CArray]& sp_array):
+        self.sp_array = sp_array
+        self.ap = <CMapArray*> sp_array.get()
+        self.key_type = pyarrow_wrap_data_type(self.ap.map_type().key_type())
+        self.item_type = pyarrow_wrap_data_type(self.ap.map_type().item_type())
+
+    cdef getitem(self, int64_t i):
+        cdef int64_t j = self.ap.value_offset(self.index) + i
+        return (box_scalar(self.key_type, self.ap.keys(), j),
+                box_scalar(self.item_type, self.ap.items(), j))
+
+    cdef int64_t length(self):
+        return self.ap.value_length(self.index)
+
+    def as_py(self):
+        """
+        Return this value as a Python list of tuples, each containing a
+        key and item.
+        """
+        cdef:
+            int64_t j
+            list result = []
+
+        for j in range(len(self)):
+            key, item = self.getitem(j)
+            result.append((key.as_py(), item.as_py()))
+
+        return result
+
+
+cdef class FixedSizeListValue(ArrayValue):
+    """
+    Concrete class for fixed size list array elements.
+    """
+
+    def __len__(self):
+        """
+        Return the number of values.
+        """
+        return self.length()
+
+    def __getitem__(self, i):
+        """
+        Return the value at the given index.
+        """
+        return self.getitem(_normalize_index(i, self.length()))
+
+    def __iter__(self):
+        """
+        Iterate over this element's values.
+        """
+        for i in range(len(self)):
+            yield self.getitem(i)
+        raise StopIteration
+
+    cdef void _set_array(self, const shared_ptr[CArray]& sp_array):
+        self.sp_array = sp_array
+        self.ap = <CFixedSizeListArray*> sp_array.get()
+        self.value_type = pyarrow_wrap_data_type(self.ap.value_type())
+
+    cdef getitem(self, int64_t i):
+        cdef int64_t j = self.ap.value_offset(self.index) + i
+        return box_scalar(self.value_type, self.ap.values(), j)
+
+    cdef int64_t length(self):
+        return self.ap.value_length(self.index)
+
+    def as_py(self):
+        """
+        Return this value as a Python list.
+        """
+        cdef:
+            int64_t j
+            list result = []
+
+        for j in range(len(self)):
+            result.append(self.getitem(j).as_py())
+
+        return result
+
+
 cdef class UnionValue(ArrayValue):
     """
     Concrete class for union array elements.
@@ -510,12 +847,12 @@ cdef class UnionValue(ArrayValue):
         self.ap = <CUnionArray*> sp_array.get()
 
     cdef getitem(self, int64_t i):
-        cdef int8_t type_id = self.ap.raw_type_ids()[i]
-        cdef shared_ptr[CArray] child = self.ap.child(type_id)
+        cdef int child_id = self.ap.child_id(i)
+        cdef shared_ptr[CArray] child = self.ap.child(child_id)
         if self.ap.mode() == _UnionMode_SPARSE:
-            return box_scalar(self.type[type_id].type, child, i)
+            return box_scalar(self.type[child_id].type, child, i)
         else:
-            return box_scalar(self.type[type_id].type, child,
+            return box_scalar(self.type[child_id].type, child,
                               self.ap.value_offset(i))
 
     def as_py(self):
@@ -624,7 +961,7 @@ cdef class DictionaryValue(ArrayValue):
         return dictionary[self.index_value.as_py()]
 
 
-cdef dict _scalar_classes = {
+cdef dict _array_value_classes = {
     _Type_BOOL: BooleanValue,
     _Type_UINT8: UInt8Value,
     _Type_UINT16: UInt16Value,
@@ -639,19 +976,203 @@ cdef dict _scalar_classes = {
     _Type_TIME32: Time32Value,
     _Type_TIME64: Time64Value,
     _Type_TIMESTAMP: TimestampValue,
+    _Type_DURATION: DurationValue,
     _Type_HALF_FLOAT: HalfFloatValue,
     _Type_FLOAT: FloatValue,
     _Type_DOUBLE: DoubleValue,
     _Type_LIST: ListValue,
+    _Type_LARGE_LIST: LargeListValue,
+    _Type_MAP: MapValue,
+    _Type_FIXED_SIZE_LIST: FixedSizeListValue,
     _Type_UNION: UnionValue,
     _Type_BINARY: BinaryValue,
     _Type_STRING: StringValue,
+    _Type_LARGE_BINARY: LargeBinaryValue,
+    _Type_LARGE_STRING: LargeStringValue,
     _Type_FIXED_SIZE_BINARY: FixedSizeBinaryValue,
     _Type_DECIMAL: DecimalValue,
     _Type_STRUCT: StructValue,
     _Type_DICTIONARY: DictionaryValue,
 }
 
+cdef class ScalarValue(Scalar):
+    """
+    The base class for scalars.
+    """
+
+    def __init__(self):
+        raise TypeError("Do not call {}'s constructor directly."
+                        .format(self.__class__.__name__))
+
+    cdef void init(self, const shared_ptr[CScalar]& sp_scalar):
+        self.sp_scalar = sp_scalar
+
+    def __repr__(self):
+        if hasattr(self, 'as_py'):
+            return repr(self.as_py())
+        else:
+            return super(Scalar, self).__repr__()
+
+    def __str__(self):
+        if hasattr(self, 'as_py'):
+            return str(self.as_py())
+        else:
+            return super(Scalar, self).__str__()
+
+    def __eq__(self, other):
+        if hasattr(self, 'as_py'):
+            if isinstance(other, ScalarValue):
+                other = other.as_py()
+            return self.as_py() == other
+        else:
+            raise NotImplemented(
+                "Cannot compare scalars that don't support as_py()")
+
+    def __hash__(self):
+        return hash(self.as_py())
+
+cdef class UInt8Scalar(ScalarValue):
+    """
+    Concrete class for uint8 scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python int.
+        """
+        cdef CUInt8Scalar* sp = <CUInt8Scalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef class Int8Scalar(ScalarValue):
+    """
+    Concrete class for int8 scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python int.
+        """
+        cdef CInt8Scalar* sp = <CInt8Scalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef class UInt16Scalar(ScalarValue):
+    """
+    Concrete class for uint16 scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python int.
+        """
+        cdef CUInt16Scalar* sp = <CUInt16Scalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef class Int16Scalar(ScalarValue):
+    """
+    Concrete class for int16 scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python int.
+        """
+        cdef CInt16Scalar* sp = <CInt16Scalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef class UInt32Scalar(ScalarValue):
+    """
+    Concrete class for uint32 scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python int.
+        """
+        cdef CUInt32Scalar* sp = <CUInt32Scalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef class Int32Scalar(ScalarValue):
+    """
+    Concrete class for int32 scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python int.
+        """
+        cdef CInt32Scalar* sp = <CInt32Scalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef class UInt64Scalar(ScalarValue):
+    """
+    Concrete class for uint64 scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python int.
+        """
+        cdef CUInt64Scalar* sp = <CUInt64Scalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef class Int64Scalar(ScalarValue):
+    """
+    Concrete class for int64 scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python int.
+        """
+        cdef CInt64Scalar* sp = <CInt64Scalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef class FloatScalar(ScalarValue):
+    """
+    Concrete class for float scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python float.
+        """
+        cdef CFloatScalar* sp = <CFloatScalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef class DoubleScalar(ScalarValue):
+    """
+    Concrete class for double scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python float.
+        """
+        cdef CDoubleScalar* sp = <CDoubleScalar*> self.sp_scalar.get()
+        return sp.value
+
+
+cdef dict _scalar_classes = {
+    _Type_UINT8: UInt8Scalar,
+    _Type_UINT16: UInt16Scalar,
+    _Type_UINT32: UInt32Scalar,
+    _Type_UINT64: UInt64Scalar,
+    _Type_INT8: Int8Scalar,
+    _Type_INT16: Int16Scalar,
+    _Type_INT32: Int32Scalar,
+    _Type_INT64: Int64Scalar,
+    _Type_FLOAT: FloatScalar,
+    _Type_DOUBLE: DoubleScalar,
+}
 
 cdef object box_scalar(DataType type, const shared_ptr[CArray]& sp_array,
                        int64_t index):
@@ -662,7 +1183,7 @@ cdef object box_scalar(DataType type, const shared_ptr[CArray]& sp_array,
     elif sp_array.get().IsNull(index):
         return _NULL
     else:
-        klass = _scalar_classes[type.type.id()]
+        klass = _array_value_classes[type.type.id()]
         value = klass.__new__(klass)
         value.init(type, sp_array, index)
         return value

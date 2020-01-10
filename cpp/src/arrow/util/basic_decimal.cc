@@ -27,8 +27,8 @@
 #include <limits>
 #include <string>
 
-#include "arrow/util/bit-util.h"
-#include "arrow/util/int-util.h"
+#include "arrow/util/bit_util.h"
+#include "arrow/util/int_util.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
 
@@ -456,6 +456,7 @@ DecimalStatus BasicDecimal128::Divide(const BasicDecimal128& divisor,
 
   int64_t result_length = dividend_length - divisor_length;
   uint32_t result_array[4];
+  DCHECK_LE(result_length, 4);
 
   // Normalize by shifting both by a multiple of 2 so that
   // the digit guessing is better. The requirement is that
@@ -648,7 +649,8 @@ void BasicDecimal128::GetWholeAndFraction(int scale, BasicDecimal128* whole,
   DCHECK_LE(scale, 38);
 
   BasicDecimal128 multiplier(ScaleMultipliers[scale]);
-  DCHECK_EQ(Divide(multiplier, whole, fraction), DecimalStatus::kSuccess);
+  auto s = Divide(multiplier, whole, fraction);
+  DCHECK_EQ(s, DecimalStatus::kSuccess);
 }
 
 const BasicDecimal128& BasicDecimal128::GetScaleMultiplier(int32_t scale) {
@@ -678,7 +680,8 @@ BasicDecimal128 BasicDecimal128::ReduceScaleBy(int32_t reduce_by, bool round) co
   BasicDecimal128 divisor(ScaleMultipliers[reduce_by]);
   BasicDecimal128 result;
   BasicDecimal128 remainder;
-  DCHECK_EQ(Divide(divisor, &result, &remainder), DecimalStatus::kSuccess);
+  auto s = Divide(divisor, &result, &remainder);
+  DCHECK_EQ(s, DecimalStatus::kSuccess);
   if (round) {
     auto divisor_half = ScaleMultipliersHalf[reduce_by];
     if (remainder.Abs() >= divisor_half) {

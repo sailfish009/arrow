@@ -15,18 +15,27 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! DataFusion is a modern distributed compute platform implemented in Rust that uses
-//! Apache Arrow as the memory model
+//! DataFusion is an extensible query execution framework that uses
+//! Apache Arrow as the memory model.
+//!
+//! DataFusion supports both SQL and a Table/DataFrame-style API for building logical query plans
+//! and also provides a query optimizer and execution engine capable of parallel execution
+//! against partitioned data sources (CSV and Parquet) using threads.
+//!
+//! DataFusion currently supports simple projection, selection, and aggregate queries.
+
+#![warn(missing_docs)]
 
 extern crate arrow;
-#[macro_use]
-extern crate serde_derive;
-extern crate serde_json;
 extern crate sqlparser;
 
 pub mod datasource;
-pub mod dfparser;
+pub mod error;
 pub mod execution;
 pub mod logicalplan;
 pub mod optimizer;
-pub mod sqlplanner;
+pub mod sql;
+pub mod table;
+
+#[cfg(test)]
+pub mod test;

@@ -20,7 +20,20 @@
 #include <limits>
 #include <memory>
 
+#include "arrow/flight/platform.h"
+#include "arrow/util/config.h"
+
+// Silence protobuf warnings
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4244)
+#endif
+
+#ifdef GRPCPP_PP_INCLUDE
 #include <grpcpp/impl/codegen/config_protobuf.h>
+#else
+#include <grpc++/impl/codegen/config_protobuf.h>
+#endif
 
 // It is necessary to undefined this macro so that the protobuf
 // SerializationTraits specialization is not declared in proto_utils.h. We've
@@ -29,7 +42,15 @@
 // for our faster serialization-deserialization path
 #undef GRPC_OPEN_SOURCE_PROTO
 
+#ifdef GRPCPP_PP_INCLUDE
 #include <grpcpp/impl/codegen/proto_utils.h>
+#else
+#include <grpc++/impl/codegen/proto_utils.h>
+#endif
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 namespace grpc {
 
@@ -91,6 +112,8 @@ template <class T>
 class SerializationTraits<T, typename std::enable_if<std::is_same<
                                  arrow::flight::protocol::FlightData, T>::value>::type> {
  public:
+  // In the functions below, we cast back the Message argument to its real
+  // type (see ReadPayload() and WritePayload() for the initial cast).
   static Status Serialize(const grpc::protobuf::Message& msg, ByteBuffer* bb,
                           bool* own_buffer) {
     return arrow::flight::internal::FlightDataSerialize(

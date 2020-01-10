@@ -15,24 +15,17 @@
 @rem specific language governing permissions and limitations
 @rem under the License.
 
-if "%JOB%" == "Rust" (
-    if "%ARROW_CI_RUST_AFFECTED%" == "0" (
+if "%JOB:~,5%" == "MinGW" (
+    if "%ARROW_CI_RUBY_AFFECTED%" == "0" (
         echo ===
-        echo === No Rust changes, exiting job
-        echo ===
-        appveyor exit
-    )
-) else if "%JOB%" == "MinGW" (
-    if "%ARROW_CI_GLIB_AFFECTED%" == "0" (
-        echo ===
-        echo === No C++, or GLib changes, exiting job
+        echo === No C++, GLib or Ruby changes, exiting job
         echo ===
         appveyor exit
     )
-) else if "%JOB%" == "C#" (
-    if "%ARROW_CI_CSHARP_AFFECTED%" == "0" (
+) else if "%JOB:~,2%" == "R " (
+    if "%ARROW_CI_R_AFFECTED%" == "0" (
         echo ===
-        echo === No C# changes, exiting job
+        echo === No C++ or R changes, exiting job
         echo ===
         appveyor exit
     )

@@ -15,31 +15,27 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from distutils.version import LooseVersion
+from __future__ import absolute_import
+
 import os
 
 import six
-import pandas as pd
 
-from pyarrow.compat import pdapi
+from pyarrow.pandas_compat import _pandas_api  # noqa
 from pyarrow.lib import FeatherError  # noqa
 from pyarrow.lib import Table, concat_tables
 import pyarrow.lib as ext
 
 
-try:
-    infer_dtype = pdapi.infer_dtype
-except AttributeError:
-    infer_dtype = pd.lib.infer_dtype
-
-
-if LooseVersion(pd.__version__) < '0.17.0':
-    raise ImportError("feather requires pandas >= 0.17.0")
+def _check_pandas_version():
+    if _pandas_api.loose_version < '0.17.0':
+        raise ImportError("feather requires pandas >= 0.17.0")
 
 
 class FeatherReader(ext.FeatherReader):
 
     def __init__(self, source):
+        _check_pandas_version()
         self.source = source
         self.open(source)
 
@@ -62,30 +58,32 @@ class FeatherReader(ext.FeatherReader):
             use_threads=use_threads)
 
 
-def check_chunked_overflow(col):
-    if col.data.num_chunks == 1:
+def check_chunked_overflow(name, col):
+    if col.num_chunks == 1:
         return
 
     if col.type in (ext.binary(), ext.string()):
         raise ValueError("Column '{0}' exceeds 2GB maximum capacity of "
                          "a Feather binary column. This restriction may be "
-                         "lifted in the future".format(col.name))
+                         "lifted in the future".format(name))
     else:
         # TODO(wesm): Not sure when else this might be reached
         raise ValueError("Column '{0}' of type {1} was chunked on conversion "
                          "to Arrow and cannot be currently written to "
-                         "Feather format".format(col.name, str(col.type)))
+                         "Feather format".format(name, str(col.type)))
 
 
 class FeatherWriter(object):
 
     def __init__(self, dest):
+        _check_pandas_version()
         self.dest = dest
         self.writer = ext.FeatherWriter()
         self.writer.open(dest)
 
     def write(self, df):
-        if isinstance(df, pd.SparseDataFrame):
+        if (_pandas_api.has_sparse
+                and isinstance(df, _pandas_api.pd.SparseDataFrame)):
             df = df.to_dense()
 
         if not df.columns.is_unique:
@@ -96,8 +94,8 @@ class FeatherWriter(object):
             table = Table.from_pandas(df, preserve_index=False)
             for i, name in enumerate(table.schema.names):
                 col = table[i]
-                check_chunked_overflow(col)
-                self.writer.write_array(name, col.data.chunk(0))
+                check_chunked_overflow(name, col)
+                self.writer.write_array(name, col.chunk(0))
 
         self.writer.close()
 
@@ -114,6 +112,7 @@ class FeatherDataset(object):
         Check that individual file schemas are all the same / compatible
     """
     def __init__(self, path_or_paths, validate_schema=True):
+        _check_pandas_version()
         self.paths = path_or_paths
         self.validate_schema = validate_schema
 
