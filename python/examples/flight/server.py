@@ -27,8 +27,8 @@ import pyarrow.flight
 
 
 class FlightServer(pyarrow.flight.FlightServerBase):
-    def __init__(self):
-        super(FlightServer, self).__init__()
+    def init(self, location=None, **kwargs):
+        super(FlightServer, self).__init__(location, **kwargs)
         self.flights = {}
 
     @classmethod
@@ -124,7 +124,7 @@ def main():
     location = "{}://0.0.0.0:{}".format(scheme, args.port)
     server.init(location, **kwargs)
     print("Serving on", location)
-    server.run()
+    server.serve()
 
 
 if __name__ == '__main__':
