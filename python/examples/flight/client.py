@@ -140,7 +140,7 @@ def main():
         if args.tls_roots:
             with open(args.tls_roots, "rb") as root_certs:
                 connection_args["tls_root_certs"] = root_certs.read()
-    client = pyarrow.flight.FlightClient.connect(f"{scheme}://{host}:{port}",
+    client = pyarrow.flight.connect(f"{scheme}://{host}:{port}",
                                                  **connection_args)
     while True:
         try:
