@@ -284,6 +284,10 @@ Now build and install the Arrow C++ libraries:
    make -j4
    make install
    popd
+   
+vim ./build/src/arrow/flight/CMakeFiles/flight_grpc_gen.dir/build.make :
+
+--plugin=protoc-gen-grpc=/usr/local/bin/grpc_cpp_plugin
 
 Many of these components are optional, and can be switched off by setting them
 to ``OFF``:
